@@ -1433,3 +1433,223 @@ def picks_cmd(
         typer.echo("-" * 85)
         for k in other_keys:
             typer.echo(_fmt(k, summary[k]))
+
+
+@app.command("advice")
+def advice_cmd(
+    date_str: str = typer.Option(
+        None, "--date", help="Target date (YYYY-MM-DD). Defaults to today.",
+    ),
+    min_prob: float = typer.Option(
+        0.0, "--min-prob",
+        help="Only advise uclu_top1 when model top-1 probability >= this (%).",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="JSON output."),
+) -> None:
+    """Günün bahis tavsiyeleri — scheduler'ın ürettiği picks'i "bugün ne
+    oynayım?" formatında gösterir.
+
+    /picks panosu (geriye dönük ledger) vs advice (ileriye dönük
+    "bugün bu bahisleri koy") farkını net tutmak için ayrı komut.
+    Sadece BETTING stratejileri gösterilir (uclu_top1 / uclu_box6 /
+    sirali_ikili_top1) — ganyan_top1 referans olduğu için dışarıda.
+    """
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+
+    from datetime import date as _date, datetime as _dt
+    from ganyan.db import get_session
+    from ganyan.db.models import Race, Pick, RaceStatus
+    from sqlalchemy.orm import joinedload
+
+    target_date = (
+        _dt.strptime(date_str, "%Y-%m-%d").date() if date_str else _date.today()
+    )
+    BETTING_STRATEGIES = ("uclu_top1", "uclu_box6", "sirali_ikili_top1")
+
+    session = get_session()
+    try:
+        races = (
+            session.query(Race)
+            .options(joinedload(Race.track), joinedload(Race.entries))
+            .filter(Race.date == target_date)
+            .order_by(Race.post_time.nulls_last(), Race.race_number)
+            .all()
+        )
+        if not races:
+            typer.echo(f"{target_date} için yarış bulunamadı. "
+                       f"Önce: uv run ganyan scrape --today")
+            return
+
+        race_ids = [r.id for r in races]
+        picks = (
+            session.query(Pick)
+            .filter(Pick.race_id.in_(race_ids),
+                    Pick.strategy.in_(BETTING_STRATEGIES))
+            .all()
+        )
+        picks_by_race: dict[int, dict[str, Pick]] = {}
+        for p in picks:
+            picks_by_race.setdefault(p.race_id, {})[p.strategy] = p
+
+        # Actual top-3 for resulted races (so we can show hit/miss).
+        # Resolve the winner's display name while the session is still
+        # open so we don't hit a DetachedInstanceError later.
+        results_by_race: dict[int, tuple[int, int, int]] = {}
+        winner_name_by_race: dict[int, str] = {}
+        for r in races:
+            if r.status != RaceStatus.resulted:
+                continue
+            ordered = sorted(
+                [e for e in r.entries if e.finish_position in (1, 2, 3)],
+                key=lambda e: e.finish_position,
+            )
+            if len(ordered) >= 3:
+                results_by_race[r.id] = (
+                    ordered[0].horse_id, ordered[1].horse_id, ordered[2].horse_id,
+                )
+                winner_entry = ordered[0]
+                winner_name_by_race[r.id] = (
+                    winner_entry.horse.name if winner_entry.horse
+                    else f"#{winner_entry.horse_id}"
+                )
+    finally:
+        session.close()
+
+    if json_output:
+        import json
+        out = []
+        for race in races:
+            rpicks = picks_by_race.get(race.id, {})
+            if not rpicks:
+                continue
+            item = {
+                "race_id": race.id,
+                "track": race.track.name if race.track else None,
+                "race_number": race.race_number,
+                "post_time": race.post_time,
+                "distance_meters": race.distance_meters,
+                "status": race.status.value if race.status else None,
+                "picks": {
+                    strat: {
+                        "combination_names": p.combination_names,
+                        "stake_tl": float(p.stake_tl),
+                        "model_prob_pct": float(p.model_prob_pct) if p.model_prob_pct else None,
+                        "graded": p.graded,
+                        "hit": p.hit,
+                        "payout_tl": float(p.payout_tl) if p.payout_tl else None,
+                    } for strat, p in rpicks.items()
+                },
+            }
+            out.append(item)
+        typer.echo(json.dumps(out, indent=2, ensure_ascii=False, default=str))
+        return
+
+    # Text output
+    typer.echo(f"=== {target_date} BET ADVICE ({len(races)} races) ===\n")
+
+    total_stake_advised = 0.0      # what you'd pay if every pool formed
+    total_stake_effective = 0.0    # stakes actually resolved (graded) or still pending
+    total_tickets = 0
+    n_races_advised = 0
+    n_races_with_any_hit = 0
+    total_payout = 0.0
+    skipped_low_prob = 0
+    n_no_pool = 0                  # picks for strategies without a published pool
+
+    for race in races:
+        rpicks = picks_by_race.get(race.id, {})
+        if not rpicks:
+            continue
+        result = results_by_race.get(race.id)
+        status_badge = ""
+        if race.status == RaceStatus.resulted:
+            status_badge = " [resulted]"
+        elif race.status == RaceStatus.scheduled:
+            status_badge = " [scheduled]"
+
+        track = race.track.name if race.track else "?"
+        post = race.post_time or "--:--"
+        header = (f"{track:<10} R{race.race_number:<2} {post}  "
+                  f"{race.distance_meters or 0}m{status_badge}")
+        typer.echo(header)
+
+        race_had_hit = False
+        for strat in BETTING_STRATEGIES:
+            p = rpicks.get(strat)
+            if p is None:
+                continue
+
+            prob = float(p.model_prob_pct) if p.model_prob_pct else 0.0
+            skip_reason = None
+            if strat == "uclu_top1" and prob < min_prob:
+                skip_reason = f"prob {prob:.1f}% < --min-prob {min_prob:.1f}%"
+
+            names = " → ".join(p.combination_names) if p.combination_names else "?"
+            if len(names) > 42:
+                names = names[:40] + "…"
+            stake = float(p.stake_tl)
+
+            if skip_reason:
+                skipped_low_prob += 1
+                typer.echo(f"  [SKIP] {strat:<20} {names}  ({skip_reason})")
+                continue
+
+            bet_mark = f"{stake:>4.0f} TL"
+            outcome = ""
+            is_effective = True
+            if p.graded:
+                if p.hit:
+                    race_had_hit = True
+                    pay = float(p.payout_tl or 0)
+                    outcome = f"  ✓ HIT  payout {pay:,.0f}"
+                    total_payout += pay
+                else:
+                    outcome = f"  ✗ miss"
+            elif race.status == RaceStatus.resulted:
+                # Resulted but ungraded → pool wasn't published (no bet
+                # could've been placed / TJK would refund).  Don't count
+                # in the effective stake.
+                outcome = "  · no-pool (refunded)"
+                is_effective = False
+                n_no_pool += 1
+            else:
+                outcome = "  (pending)"
+
+            typer.echo(f"  [BET ] {strat:<20} {names}  prob {prob:>4.1f}%  {bet_mark}{outcome}")
+            total_stake_advised += stake
+            if is_effective:
+                total_stake_effective += stake
+            total_tickets += int(p.ticket_count or 1)
+
+        if race.status == RaceStatus.resulted and result:
+            winner_name = winner_name_by_race.get(race.id, f"#{result[0]}")
+            typer.echo(f"         actual winner: {winner_name}")
+
+        if race_had_hit:
+            n_races_with_any_hit += 1
+        n_races_advised += 1
+        typer.echo("")
+
+    # Summary
+    typer.echo(f"--- SUMMARY ---")
+    typer.echo(f"advised races          : {n_races_advised} / {len(races)}")
+    typer.echo(f"total advised tickets  : {total_tickets}")
+    typer.echo(f"advised stake (gross)  : {total_stake_advised:,.0f} TL")
+    if n_no_pool:
+        typer.echo(f"no-pool refunded       : {n_no_pool} picks "
+                   f"(-{total_stake_advised - total_stake_effective:,.0f} TL stake removed)")
+    typer.echo(f"effective stake        : {total_stake_effective:,.0f} TL")
+    any_graded = any(
+        p.graded for rpicks in picks_by_race.values() for p in rpicks.values()
+    )
+    if any_graded:
+        net = total_payout - total_stake_effective
+        roi = 100 * net / total_stake_effective if total_stake_effective else 0
+        sign = "+" if roi >= 0 else ""
+        typer.echo(f"payout (graded hits)   : {total_payout:,.0f} TL")
+        typer.echo(f"net P&L                : {net:+,.0f} TL "
+                   f"({sign}{roi:.1f}% ROI on effective stake)")
+        typer.echo(f"races with any hit     : {n_races_with_any_hit}")
+    if skipped_low_prob:
+        typer.echo(f"skipped (low prob)     : {skipped_low_prob} picks")
