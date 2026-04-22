@@ -1043,3 +1043,196 @@ def picks_dashboard():
         )
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# /advice — forward-looking bet advisor (companion to /picks ledger)
+# ---------------------------------------------------------------------------
+
+
+@bp.route("/advice")
+def advice_dashboard():
+    """Today's (or ?date=) recommended bets with Kelly-sized stakes.
+
+    Reads the picks the scheduler already generated and presents them
+    in a "here's what to bet tonight" format.  Distinct from /picks
+    which is historical P&L.
+    """
+    from datetime import datetime as _dt
+    from ganyan.db.models import Pick, Race, RaceStatus, Track
+    from ganyan.predictor.kelly import (
+        strategy_edge_stats, suggested_stake_tl, kelly_fraction,
+    )
+    from sqlalchemy.orm import joinedload
+
+    BETTING_STRATEGIES = ("uclu_top1", "uclu_box6", "sirali_ikili_top1")
+    STRATEGY_ORDER = {s: i for i, s in enumerate(BETTING_STRATEGIES)}
+
+    date_str = request.args.get("date")
+    bankroll = float(request.args.get("bankroll", 10000))
+    kelly_mult = float(request.args.get("kelly", 0.25))
+    try:
+        target_date = (
+            _dt.strptime(date_str, "%Y-%m-%d").date() if date_str else date.today()
+        )
+    except ValueError:
+        target_date = date.today()
+
+    session = _get_session()
+    try:
+        edge_stats = strategy_edge_stats(session, strategies=BETTING_STRATEGIES)
+
+        races = (
+            session.query(Race)
+            .options(joinedload(Race.track), joinedload(Race.entries))
+            .filter(Race.date == target_date)
+            .order_by(Race.post_time.nulls_last(), Race.race_number)
+            .all()
+        )
+        race_ids = [r.id for r in races]
+        picks = (
+            session.query(Pick)
+            .filter(
+                Pick.race_id.in_(race_ids),
+                Pick.strategy.in_(BETTING_STRATEGIES),
+            )
+            .all() if race_ids else []
+        )
+        picks_by_race: dict[int, list[Pick]] = {}
+        for p in picks:
+            picks_by_race.setdefault(p.race_id, []).append(p)
+
+        # Winner name per resulted race (while session is open).
+        winner_name_by_race: dict[int, str] = {}
+        for r in races:
+            if r.status != RaceStatus.resulted:
+                continue
+            winner = next(
+                (e for e in r.entries if e.finish_position == 1), None,
+            )
+            if winner and winner.horse:
+                winner_name_by_race[r.id] = winner.horse.name
+
+        # Build view model — per-race card with pick rows enriched with
+        # Kelly suggestion + outcome flags.
+        races_with_picks = []
+        n_advised = n_with_hit = n_no_pool = 0
+        gross_stake = effective_stake = total_payout = 0.0
+        any_graded = False
+
+        for r in races:
+            rpicks = picks_by_race.get(r.id)
+            if not rpicks:
+                continue
+            race_had_hit = False
+            pick_rows = []
+            rpicks.sort(key=lambda p: STRATEGY_ORDER.get(p.strategy, 99))
+            for p in rpicks:
+                prob = float(p.model_prob_pct or 0)
+                stake = float(p.stake_tl)
+                stats = edge_stats.get(p.strategy)
+                kelly_tl = 0.0
+                if stats and stats.avg_b > 0 and stats.hit_rate > 0:
+                    kelly_tl = suggested_stake_tl(
+                        win_prob=stats.hit_rate,
+                        b=stats.avg_b,
+                        bankroll_tl=bankroll,
+                        base_stake_tl=stake,
+                        kelly_multiplier=kelly_mult,
+                    )
+
+                is_miss = p.graded and not p.hit
+                is_no_pool = (
+                    not p.graded and r.status == RaceStatus.resulted
+                )
+                if is_no_pool:
+                    n_no_pool += 1
+                if p.graded and p.hit:
+                    race_had_hit = True
+                    any_graded = True
+                    total_payout += float(p.payout_tl or 0)
+                elif p.graded:
+                    any_graded = True
+
+                gross_stake += stake
+                if not is_no_pool:
+                    effective_stake += stake
+
+                pick_rows.append({
+                    "strategy": p.strategy,
+                    "combination_display": " → ".join(
+                        p.combination_names or [],
+                    ),
+                    "model_prob_pct": prob,
+                    "stake_tl": stake,
+                    "kelly_tl": kelly_tl,
+                    "hit": bool(p.hit) if p.graded else False,
+                    "is_miss": is_miss,
+                    "is_no_pool": is_no_pool,
+                    "payout_tl": float(p.payout_tl) if p.payout_tl else 0.0,
+                })
+
+            races_with_picks.append({
+                "race": r,
+                "picks": pick_rows,
+                "winner_name": winner_name_by_race.get(r.id),
+            })
+            n_advised += 1
+            if race_had_hit:
+                n_with_hit += 1
+
+        # Strategy edge dict for the template (pre-compute Kelly on 10K).
+        edge_display = {}
+        for k, v in edge_stats.items():
+            kf = kelly_fraction(v.hit_rate, v.avg_b, kelly_multiplier=kelly_mult)
+            d = v.to_dict()
+            d["kelly_quarter_10k"] = kf * 10000
+            edge_display[k] = d
+
+        net = total_payout - effective_stake
+        roi = (100 * net / effective_stake) if effective_stake > 0 else 0.0
+        summary = {
+            "n_advised": n_advised,
+            "n_total": len(races),
+            "gross_stake": gross_stake,
+            "effective_stake": effective_stake,
+            "n_no_pool": n_no_pool,
+            "graded": any_graded,
+            "payout": total_payout,
+            "net": net,
+            "roi_pct": roi,
+            "n_with_hit": n_with_hit,
+        }
+
+        if _wants_json():
+            return jsonify({
+                "date": str(target_date),
+                "bankroll_tl": bankroll,
+                "kelly_multiplier": kelly_mult,
+                "summary": summary,
+                "edge_stats": edge_display,
+                "races": [
+                    {
+                        "race_id": r["race"].id,
+                        "track": r["race"].track.name if r["race"].track else None,
+                        "race_number": r["race"].race_number,
+                        "post_time": r["race"].post_time,
+                        "distance_meters": r["race"].distance_meters,
+                        "status": (
+                            r["race"].status.value if r["race"].status else None
+                        ),
+                        "winner_name": r["winner_name"],
+                        "picks": r["picks"],
+                    } for r in races_with_picks
+                ],
+            })
+
+        return render_template(
+            "advice.html",
+            target_date=str(target_date),
+            races_with_picks=races_with_picks,
+            summary=summary,
+            edge_stats=edge_display,
+        )
+    finally:
+        session.close()

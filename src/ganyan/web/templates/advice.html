@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}Bet Advice — {{ target_date }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h2>Bet Advice <small class="text-muted">— {{ target_date }}</small></h2>
+    <div>
+        <a href="/picks" class="btn btn-outline-secondary btn-sm">Ledger →</a>
+        <button class="btn btn-outline-primary btn-sm"
+                hx-get="/advice?date={{ target_date }}"
+                hx-target="body"
+                hx-swap="outerHTML"
+                hx-trigger="click">
+            Refresh
+        </button>
+    </div>
+</div>
+
+<div class="small text-muted mb-3">
+    İleriye dönük bahis tavsiyeleri.  Scheduler'ın ürettiği picks'i
+    "bugün ne oynayım?" formatında gösterir.  <code>/picks</code> geçmişi
+    gösterir — burası "şimdi ne yapayım?".
+    Her bilet için Kelly-önerilen stake, stratejinin <strong>ampirik
+    hit rate</strong>'i ve ortalama kazanç çarpanı üzerinden hesaplanır
+    (quarter-Kelly, varsayılan bankroll ≈10K TL).
+</div>
+
+<!-- Day summary -->
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="card">
+            <div class="card-body py-2">
+                <div class="small text-muted">Races advised</div>
+                <div class="h4 mb-0">{{ summary.n_advised }} / {{ summary.n_total }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card">
+            <div class="card-body py-2">
+                <div class="small text-muted">Gross stake</div>
+                <div class="h4 mb-0">{{ "{:,.0f}".format(summary.gross_stake) }} TL</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card">
+            <div class="card-body py-2">
+                <div class="small text-muted">Effective stake</div>
+                <div class="h4 mb-0">{{ "{:,.0f}".format(summary.effective_stake) }} TL</div>
+                {% if summary.n_no_pool %}
+                <div class="small text-muted">
+                    {{ summary.n_no_pool }} no-pool picks removed
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card
+            {% if summary.graded %}{% if summary.net > 0 %}bg-success{% else %}bg-danger{% endif %} text-white{% endif %}">
+            <div class="card-body py-2">
+                <div class="small {% if summary.graded %}text-white-50{% else %}text-muted{% endif %}">
+                    {% if summary.graded %}Net P&amp;L ({{ summary.n_with_hit }} hits){% else %}Pending{% endif %}
+                </div>
+                <div class="h4 mb-0">
+                    {% if summary.graded %}
+                        {{ "{:+,.0f}".format(summary.net) }} TL
+                        <small>({{ "{:+.1f}%".format(summary.roi_pct) }})</small>
+                    {% else %}
+                        —
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Strategy edge stats card -->
+<details class="mb-4">
+    <summary class="text-muted small" style="cursor: pointer;">
+        Strategy edge stats (last 90d, used for Kelly sizing) — click to expand
+    </summary>
+    <div class="mt-2 table-responsive">
+        <table class="table table-sm small">
+            <thead>
+                <tr>
+                    <th>Strategy</th>
+                    <th class="text-end">Graded n</th>
+                    <th class="text-end">Hit rate</th>
+                    <th class="text-end">Avg stake</th>
+                    <th class="text-end">Avg winning payout</th>
+                    <th class="text-end">avg_b</th>
+                    <th class="text-end">¼-Kelly @10K</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for strat, es in edge_stats.items() %}
+                <tr>
+                    <td><code>{{ strat }}</code></td>
+                    <td class="text-end">{{ es.n_graded }} ({{ es.n_hits }} hits)</td>
+                    <td class="text-end">{{ "{:.1%}".format(es.hit_rate) }}</td>
+                    <td class="text-end">{{ "{:,.0f}".format(es.avg_stake_tl) }}</td>
+                    <td class="text-end">{{ "{:,.0f}".format(es.avg_winning_payout_tl) }}</td>
+                    <td class="text-end">{{ "{:.2f}".format(es.avg_b) }}</td>
+                    <td class="text-end">{{ "{:,.0f}".format(es.kelly_quarter_10k) }} TL</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</details>
+
+{% if not races_with_picks %}
+<div class="alert alert-warning">
+    {{ target_date }} için advice üretilecek pick bulunamadı.  Scheduler
+    henüz çalışmadıysa <code>uv run ganyan scrape --today</code> +
+    <code>uv run ganyan predict --today</code> ile manuel tetikleyin.
+</div>
+{% endif %}
+
+<!-- Per-race cards -->
+{% for item in races_with_picks %}
+<div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <div>
+            <strong>{{ item.race.track.name }}</strong>
+            <span class="text-muted">R{{ item.race.race_number }}</span>
+            <span class="ms-2">{{ item.race.post_time or "--:--" }}</span>
+            <span class="ms-2 text-muted">{{ item.race.distance_meters or 0 }}m</span>
+            {% if item.race.status.value == "resulted" %}
+                <span class="badge bg-secondary ms-2">resulted</span>
+            {% elif item.race.status.value == "scheduled" %}
+                <span class="badge bg-primary ms-2">scheduled</span>
+            {% endif %}
+        </div>
+        <a href="/races/{{ item.race.id }}/predict"
+           class="btn btn-sm btn-outline-secondary">per-race →</a>
+    </div>
+    <div class="card-body">
+        <table class="table table-sm mb-0">
+            <thead class="small text-muted">
+                <tr>
+                    <th>Strategy</th>
+                    <th>Combination</th>
+                    <th class="text-end">Model prob</th>
+                    <th class="text-end">Base stake</th>
+                    <th class="text-end">Kelly</th>
+                    <th>Result</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for pick in item.picks %}
+                <tr {% if pick.hit %}class="table-success"{% elif pick.is_miss %}class="table-warning"{% endif %}>
+                    <td><code>{{ pick.strategy }}</code></td>
+                    <td><small>{{ pick.combination_display }}</small></td>
+                    <td class="text-end">{{ "{:.1f}%".format(pick.model_prob_pct) }}</td>
+                    <td class="text-end">{{ "{:,.0f}".format(pick.stake_tl) }} TL</td>
+                    <td class="text-end">
+                        {% if pick.kelly_tl and pick.kelly_tl > 0 %}
+                            {{ "{:,.0f}".format(pick.kelly_tl) }} TL
+                        {% else %}
+                            <span class="text-muted">skip</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if pick.hit %}
+                            <span class="badge bg-success">✓ HIT</span>
+                            <small class="text-muted">
+                                {{ "{:,.0f}".format(pick.payout_tl or 0) }} TL
+                            </small>
+                        {% elif pick.is_miss %}
+                            <span class="badge bg-danger">✗ miss</span>
+                        {% elif pick.is_no_pool %}
+                            <span class="badge bg-light text-dark">no-pool</span>
+                        {% else %}
+                            <span class="badge bg-secondary">pending</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if item.winner_name %}
+        <div class="small text-muted mt-2">
+            Actual winner: <strong>{{ item.winner_name }}</strong>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endfor %}
+
+{% endblock %}

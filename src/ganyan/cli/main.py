@@ -1444,6 +1444,14 @@ def advice_cmd(
         0.0, "--min-prob",
         help="Only advise uclu_top1 when model top-1 probability >= this (%).",
     ),
+    bankroll: float = typer.Option(
+        10000.0, "--bankroll",
+        help="Bankroll in TL for Kelly-fraction stake sizing.",
+    ),
+    kelly_fraction: float = typer.Option(
+        0.25, "--kelly",
+        help="Kelly multiplier (0.25 = quarter-Kelly, the standard).",
+    ),
     json_output: bool = typer.Option(False, "--json", help="JSON output."),
 ) -> None:
     """Günün bahis tavsiyeleri — scheduler'ın ürettiği picks'i "bugün ne
@@ -1460,6 +1468,7 @@ def advice_cmd(
     from datetime import date as _date, datetime as _dt
     from ganyan.db import get_session
     from ganyan.db.models import Race, Pick, RaceStatus
+    from ganyan.predictor.kelly import strategy_edge_stats, suggested_stake_tl
     from sqlalchemy.orm import joinedload
 
     target_date = (
@@ -1469,6 +1478,7 @@ def advice_cmd(
 
     session = get_session()
     try:
+        edge_stats = strategy_edge_stats(session, strategies=BETTING_STRATEGIES)
         races = (
             session.query(Race)
             .options(joinedload(Race.track), joinedload(Race.entries))
@@ -1523,6 +1533,29 @@ def advice_cmd(
             rpicks = picks_by_race.get(race.id, {})
             if not rpicks:
                 continue
+            pick_data = {}
+            for strat, p in rpicks.items():
+                prob = float(p.model_prob_pct) if p.model_prob_pct else 0.0
+                stake = float(p.stake_tl)
+                kelly_tl = None
+                stats = edge_stats.get(strat)
+                if stats and stats.avg_b > 0 and stats.hit_rate > 0:
+                    kelly_tl = suggested_stake_tl(
+                        win_prob=stats.hit_rate,
+                        b=stats.avg_b,
+                        bankroll_tl=bankroll,
+                        base_stake_tl=stake,
+                        kelly_multiplier=kelly_fraction,
+                    )
+                pick_data[strat] = {
+                    "combination_names": p.combination_names,
+                    "stake_tl": stake,
+                    "kelly_suggested_tl": round(kelly_tl, 2) if kelly_tl is not None else None,
+                    "model_prob_pct": prob,
+                    "graded": p.graded,
+                    "hit": p.hit,
+                    "payout_tl": float(p.payout_tl) if p.payout_tl else None,
+                }
             item = {
                 "race_id": race.id,
                 "track": race.track.name if race.track else None,
@@ -1530,19 +1563,19 @@ def advice_cmd(
                 "post_time": race.post_time,
                 "distance_meters": race.distance_meters,
                 "status": race.status.value if race.status else None,
-                "picks": {
-                    strat: {
-                        "combination_names": p.combination_names,
-                        "stake_tl": float(p.stake_tl),
-                        "model_prob_pct": float(p.model_prob_pct) if p.model_prob_pct else None,
-                        "graded": p.graded,
-                        "hit": p.hit,
-                        "payout_tl": float(p.payout_tl) if p.payout_tl else None,
-                    } for strat, p in rpicks.items()
-                },
+                "picks": pick_data,
             }
             out.append(item)
-        typer.echo(json.dumps(out, indent=2, ensure_ascii=False, default=str))
+        meta = {
+            "date": str(target_date),
+            "bankroll_tl": bankroll,
+            "kelly_multiplier": kelly_fraction,
+            "strategy_edge_stats": {
+                k: v.to_dict() for k, v in edge_stats.items()
+            },
+            "races": out,
+        }
+        typer.echo(json.dumps(meta, indent=2, ensure_ascii=False, default=str))
         return
 
     # Text output
@@ -1616,7 +1649,30 @@ def advice_cmd(
             else:
                 outcome = "  (pending)"
 
-            typer.echo(f"  [BET ] {strat:<20} {names}  prob {prob:>4.1f}%  {bet_mark}{outcome}")
+            # Kelly-suggested stake.  We use the strategy's empirical
+            # hit rate as p (not the Harville joint prob — those are
+            # systematically compressed and Kelly would skip every bet
+            # otherwise).  Model's per-pick prob feeds --min-prob for
+            # bet-or-skip selection, not stake sizing.
+            stats = edge_stats.get(strat)
+            kelly_label = ""
+            if stats and stats.avg_b > 0 and stats.hit_rate > 0:
+                suggested = suggested_stake_tl(
+                    win_prob=stats.hit_rate,
+                    b=stats.avg_b,
+                    bankroll_tl=bankroll,
+                    base_stake_tl=stake,
+                    kelly_multiplier=kelly_fraction,
+                )
+                if suggested <= 0:
+                    kelly_label = "  kelly: skip"
+                else:
+                    kelly_label = f"  kelly: {suggested:,.0f} TL"
+
+            typer.echo(
+                f"  [BET ] {strat:<20} {names}  prob {prob:>4.1f}%  "
+                f"{bet_mark}{kelly_label}{outcome}"
+            )
             total_stake_advised += stake
             if is_effective:
                 total_stake_effective += stake
@@ -1653,3 +1709,120 @@ def advice_cmd(
         typer.echo(f"races with any hit     : {n_races_with_any_hit}")
     if skipped_low_prob:
         typer.echo(f"skipped (low prob)     : {skipped_low_prob} picks")
+
+
+@app.command("tune-thresholds")
+def tune_thresholds_cmd(
+    lookback_days: int = typer.Option(
+        90, "--lookback-days",
+        help="How many days of graded picks to sweep over.",
+    ),
+    strategy: str = typer.Option(
+        None, "--strategy",
+        help="Limit tuning to one strategy (default: all betting strategies).",
+    ),
+    min_sample: int = typer.Option(
+        30, "--min-sample",
+        help="Require at least this many graded picks above a threshold "
+             "before considering that threshold (avoid single-pick noise).",
+    ),
+) -> None:
+    """Find the ``--min-prob`` threshold per strategy that maximises
+    historical ROI on the ledger.
+
+    Walks every graded Pick in the window, sorts by ``model_prob_pct``,
+    and for each candidate threshold computes cumulative ROI on the
+    subset of picks at or above it.  Reports the threshold with the
+    highest ROI subject to ``--min-sample`` races remaining above it.
+
+    Output is both human-readable and machine-parseable — callers can
+    use the recommended thresholds to feed ``ganyan advice --min-prob``
+    or wire them into a config.
+    """
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+
+    from datetime import date as _date, timedelta
+    from ganyan.db import get_session
+    from ganyan.db.models import Pick, Race
+
+    since = _date.today() - timedelta(days=lookback_days)
+
+    BETTING_STRATEGIES = ("uclu_top1", "uclu_box6", "sirali_ikili_top1")
+    strategies = [strategy] if strategy else list(BETTING_STRATEGIES)
+
+    session = get_session()
+    try:
+        for strat in strategies:
+            rows = (
+                session.query(Pick)
+                .join(Race, Race.id == Pick.race_id)
+                .filter(
+                    Pick.strategy == strat,
+                    Pick.graded == True,  # noqa: E712
+                    Race.date >= since,
+                )
+                .all()
+            )
+            if not rows:
+                typer.echo(f"{strat}: no graded picks in last {lookback_days} days.")
+                continue
+
+            # Pre-compute (prob, stake, payout) tuples sorted by prob desc.
+            data = sorted([
+                (
+                    float(p.model_prob_pct or 0),
+                    float(p.stake_tl),
+                    float(p.payout_tl or 0) if p.hit else 0.0,
+                )
+                for p in rows
+            ], key=lambda t: -t[0])
+
+            # Evaluate thresholds: one per observed prob value.  At
+            # threshold ``t``, the subset is rows[:i] where all
+            # probs >= t.  Walk the sorted list once, accumulating.
+            best = None  # (threshold, n, stake, payout, roi)
+            cum_stake = cum_payout = 0.0
+            for i, (prob, stake, payout) in enumerate(data, start=1):
+                cum_stake += stake
+                cum_payout += payout
+                if i < min_sample:
+                    continue
+                if cum_stake <= 0:
+                    continue
+                roi = (cum_payout - cum_stake) / cum_stake * 100
+                if best is None or roi > best["roi"]:
+                    best = {
+                        "threshold_pct": prob,
+                        "n_above": i,
+                        "stake": cum_stake,
+                        "payout": cum_payout,
+                        "net": cum_payout - cum_stake,
+                        "roi": roi,
+                    }
+
+            # Baseline: no threshold (bet every graded pick).
+            total_stake = sum(s for _, s, _ in data)
+            total_payout = sum(p for _, _, p in data)
+            baseline_roi = (
+                (total_payout - total_stake) / total_stake * 100
+                if total_stake > 0 else 0
+            )
+
+            typer.echo(f"=== {strat} ({len(rows)} graded picks, "
+                       f"last {lookback_days}d) ===")
+            typer.echo(f"  baseline (no threshold): stake {total_stake:>10,.0f}  "
+                       f"payout {total_payout:>10,.0f}  ROI {baseline_roi:+6.1f}%")
+            if best is None:
+                typer.echo(f"  not enough data for --min-sample {min_sample}")
+            else:
+                delta = best["roi"] - baseline_roi
+                typer.echo(f"  best --min-prob = {best['threshold_pct']:.2f}%")
+                typer.echo(f"    keeps {best['n_above']}/{len(rows)} picks")
+                typer.echo(f"    stake {best['stake']:>10,.0f}  "
+                           f"payout {best['payout']:>10,.0f}  "
+                           f"net {best['net']:+>10,.0f}  ROI {best['roi']:+6.1f}%  "
+                           f"(Δ {delta:+.1f}pp)")
+            typer.echo("")
+    finally:
+        session.close()
