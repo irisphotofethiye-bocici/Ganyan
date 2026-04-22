@@ -1063,6 +1063,10 @@ def advice_dashboard():
     from ganyan.predictor.kelly import (
         strategy_edge_stats, suggested_stake_tl, kelly_fraction,
     )
+    from ganyan.predictor.exotics import (
+        ganyan_probabilities, sirali_ikili_probabilities,
+        uclu_probabilities,
+    )
     from sqlalchemy.orm import joinedload
 
     BETTING_STRATEGIES = ("uclu_top1", "uclu_box6", "sirali_ikili_top1")
@@ -1112,6 +1116,83 @@ def advice_dashboard():
             )
             if winner and winner.horse:
                 winner_name_by_race[r.id] = winner.horse.name
+
+        # Harville expansion per race — the individual win probs and the
+        # top-N trifecta / exacta rankings, so the advice UI can show
+        # *why* a particular combination got picked.  Keyed by race_id.
+        harville_by_race: dict[int, dict] = {}
+        for r in races:
+            if not r.entries:
+                continue
+            # Resolve names + probs in a single dict we can reuse.
+            horse_names: dict[int, str] = {}
+            win_probs: dict[int, float] = {}
+            finish_pos: dict[int, int | None] = {}
+            for e in r.entries:
+                if e.horse:
+                    horse_names[e.horse_id] = e.horse.name
+                if e.predicted_probability is not None:
+                    win_probs[e.horse_id] = max(
+                        float(e.predicted_probability) / 100.0, 0.0,
+                    )
+                finish_pos[e.horse_id] = e.finish_position
+
+            if not win_probs:
+                continue
+
+            # Actual finish for hit-highlighting on resulted races.
+            actual_top3: tuple[int, int, int] | None = None
+            actual_top2: tuple[int, int] | None = None
+            if r.status == RaceStatus.resulted:
+                by_pos = {pos: hid for hid, pos in finish_pos.items() if pos}
+                if all(k in by_pos for k in (1, 2, 3)):
+                    actual_top3 = (by_pos[1], by_pos[2], by_pos[3])
+                if all(k in by_pos for k in (1, 2)):
+                    actual_top2 = (by_pos[1], by_pos[2])
+
+            ganyan_ranked = [
+                {
+                    "horse_id": c.horses[0],
+                    "horse_name": horse_names.get(c.horses[0], "?"),
+                    "prob_pct": c.probability * 100,
+                    "finish_position": finish_pos.get(c.horses[0]),
+                }
+                for c in ganyan_probabilities(win_probs)
+            ]
+
+            uclu_top = uclu_probabilities(win_probs)[:8]
+            uclu_ranked = [
+                {
+                    "combination_names": [
+                        horse_names.get(h, "?") for h in c.horses
+                    ],
+                    "prob_pct": c.probability * 100,
+                    "hit": (
+                        actual_top3 is not None and tuple(c.horses) == actual_top3
+                    ),
+                }
+                for c in uclu_top
+            ]
+
+            si_top = sirali_ikili_probabilities(win_probs)[:6]
+            si_ranked = [
+                {
+                    "combination_names": [
+                        horse_names.get(h, "?") for h in c.horses
+                    ],
+                    "prob_pct": c.probability * 100,
+                    "hit": (
+                        actual_top2 is not None and tuple(c.horses) == actual_top2
+                    ),
+                }
+                for c in si_top
+            ]
+
+            harville_by_race[r.id] = {
+                "win_probs": ganyan_ranked,
+                "uclu_top": uclu_ranked,
+                "sirali_top": si_ranked,
+            }
 
         # Build view model — per-race card with pick rows enriched with
         # Kelly suggestion + outcome flags.
@@ -1180,6 +1261,7 @@ def advice_dashboard():
                 "race": r,
                 "picks": pick_rows,
                 "winner_name": winner_name_by_race.get(r.id),
+                "harville": harville_by_race.get(r.id),
             })
             n_advised += 1
             if race_had_hit:
@@ -1227,6 +1309,7 @@ def advice_dashboard():
                         ),
                         "winner_name": r["winner_name"],
                         "picks": r["picks"],
+                        "harville": r["harville"],
                     } for r in races_with_picks
                 ],
             })

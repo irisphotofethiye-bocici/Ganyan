@@ -190,6 +190,98 @@
             Actual winner: <strong>{{ item.winner_name }}</strong>
         </div>
         {% endif %}
+
+        {% if item.harville %}
+        <details class="mt-3">
+            <summary class="small text-muted" style="cursor: pointer;">
+                Harville model breakdown — full win-prob ranking + top combinations
+            </summary>
+            <div class="row mt-2 g-2">
+                <div class="col-md-4">
+                    <div class="small text-muted mb-1">
+                        Win probabilities (Ganyan ranking)
+                    </div>
+                    <table class="table table-sm small mb-0">
+                        <tbody>
+                            {% for h in item.harville.win_probs %}
+                            <tr {% if h.finish_position == 1 %}class="table-success"
+                                {% elif h.finish_position in [2, 3] %}class="table-info"{% endif %}>
+                                <td class="text-muted" style="width: 2em">
+                                    {{ loop.index }}.
+                                </td>
+                                <td>{{ h.horse_name }}</td>
+                                <td class="text-end">
+                                    {{ "{:.1f}%".format(h.prob_pct) }}
+                                </td>
+                                {% if h.finish_position %}
+                                <td class="text-muted" style="width: 2.5em">
+                                    {% if h.finish_position <= 3 %}
+                                        <span class="badge bg-secondary">
+                                            {{ h.finish_position }}
+                                        </span>
+                                    {% else %}
+                                        {{ h.finish_position }}
+                                    {% endif %}
+                                </td>
+                                {% endif %}
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="col-md-4">
+                    <div class="small text-muted mb-1">
+                        Üçlü Top-{{ item.harville.uclu_top | length }}
+                        (Harville joint, exact order)
+                    </div>
+                    <table class="table table-sm small mb-0">
+                        <tbody>
+                            {% for c in item.harville.uclu_top %}
+                            <tr {% if c.hit %}class="table-success"{% endif %}>
+                                <td class="text-muted" style="width: 2em">
+                                    {{ loop.index }}.
+                                </td>
+                                <td>
+                                    <small>
+                                        {{ c.combination_names | join(" → ") }}
+                                    </small>
+                                </td>
+                                <td class="text-end">
+                                    {{ "{:.2f}%".format(c.prob_pct) }}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="col-md-4">
+                    <div class="small text-muted mb-1">
+                        Sıralı İkili Top-{{ item.harville.sirali_top | length }}
+                        (Harville joint, exact order)
+                    </div>
+                    <table class="table table-sm small mb-0">
+                        <tbody>
+                            {% for c in item.harville.sirali_top %}
+                            <tr {% if c.hit %}class="table-success"{% endif %}>
+                                <td class="text-muted" style="width: 2em">
+                                    {{ loop.index }}.
+                                </td>
+                                <td>
+                                    {{ c.combination_names | join(" → ") }}
+                                </td>
+                                <td class="text-end">
+                                    {{ "{:.2f}%".format(c.prob_pct) }}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </details>
+        {% endif %}
     </div>
 </div>
 {% endfor %}
