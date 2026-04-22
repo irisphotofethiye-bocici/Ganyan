@@ -1640,10 +1640,13 @@ def advice_cmd(
                 prob = float(p.model_prob_pct) if p.model_prob_pct else 0.0
                 stake = float(p.stake_tl)
                 kelly_tl = None
+                calibrated_pct = None
                 stats = edge_stats.get(strat)
-                if stats and stats.avg_b > 0 and stats.hit_rate > 0:
+                if stats and stats.avg_b > 0 and stats.avg_model_prob > 0:
+                    cal_p = stats.calibrate(prob / 100.0)
+                    calibrated_pct = round(cal_p * 100, 3)
                     kelly_tl = suggested_stake_tl(
-                        win_prob=stats.hit_rate,
+                        win_prob=cal_p,
                         b=stats.avg_b,
                         bankroll_tl=bankroll,
                         base_stake_tl=stake,
@@ -1654,6 +1657,7 @@ def advice_cmd(
                     "stake_tl": stake,
                     "kelly_suggested_tl": round(kelly_tl, 2) if kelly_tl is not None else None,
                     "model_prob_pct": prob,
+                    "calibrated_prob_pct": calibrated_pct,
                     "graded": p.graded,
                     "hit": p.hit,
                     "payout_tl": float(p.payout_tl) if p.payout_tl else None,
@@ -1751,16 +1755,21 @@ def advice_cmd(
             else:
                 outcome = "  (pending)"
 
-            # Kelly-suggested stake.  We use the strategy's empirical
-            # hit rate as p (not the Harville joint prob — those are
-            # systematically compressed and Kelly would skip every bet
-            # otherwise).  Model's per-pick prob feeds --min-prob for
-            # bet-or-skip selection, not stake sizing.
+            # Kelly-suggested stake per race.  We calibrate the raw
+            # Harville joint prob first so Kelly gets a usable p: the
+            # model's joint probs are systematically compressed (mean
+            # ~1% when the empirical hit rate is 4%), so raw-in Kelly
+            # would skip every bet.  Calibration preserves per-race
+            # ranking while aligning the level with history — strong
+            # picks get more Kelly, weak picks stay at skip.
             stats = edge_stats.get(strat)
             kelly_label = ""
-            if stats and stats.avg_b > 0 and stats.hit_rate > 0:
+            calibrated_pct = None
+            if stats and stats.avg_b > 0 and stats.avg_model_prob > 0:
+                calibrated_p = stats.calibrate(prob / 100.0)
+                calibrated_pct = calibrated_p * 100
                 suggested = suggested_stake_tl(
-                    win_prob=stats.hit_rate,
+                    win_prob=calibrated_p,
                     b=stats.avg_b,
                     bankroll_tl=bankroll,
                     base_stake_tl=stake,

@@ -38,6 +38,29 @@ class StrategyEdgeStats:
     avg_winning_payout_tl: float       # mean payout on winning tickets
     avg_stake_tl: float                # stake per ticket (constant per strategy)
     avg_b: float                       # (avg_winning_payout / avg_stake) - 1
+    avg_model_prob: float              # mean model_prob_pct/100 across graded picks
+    calibration_factor: float          # hit_rate / avg_model_prob (=1 if well-calibrated)
+
+    def calibrate(self, raw_model_prob: float, max_multiplier: float = 3.0) -> float:
+        """Scale a raw model prob so the mean matches empirical hit rate.
+
+        Preserves the *ranking* of the model's confidence across races
+        (a 0.5% raw stays below a 2% raw) while aligning the overall
+        level with what actually happens, so Kelly gets a usable p.
+
+        Capped at ``max_multiplier * hit_rate`` to stop an outlier raw
+        prob from producing a full-bankroll Kelly bet.  Default 3×:
+        a pick gets rated at most 3× as likely to win as the strategy's
+        historical average.  For uclu_top1 (hit rate 4.2%) that caps at
+        12.6% calibrated prob; for uclu_box6 (15.3%) at 45.9%.  Below
+        the cap, calibration is linear in raw prob so Kelly still
+        varies with confidence.
+        """
+        if self.avg_model_prob <= 0 or self.hit_rate <= 0:
+            return 0.0
+        scaled = raw_model_prob * self.calibration_factor
+        cap = max_multiplier * self.hit_rate
+        return max(0.0, min(scaled, cap, 1.0))
 
     def to_dict(self) -> dict:
         return {
@@ -48,6 +71,8 @@ class StrategyEdgeStats:
             "avg_winning_payout_tl": round(self.avg_winning_payout_tl, 2),
             "avg_stake_tl": round(self.avg_stake_tl, 2),
             "avg_b": round(self.avg_b, 4),
+            "avg_model_prob": round(self.avg_model_prob, 4),
+            "calibration_factor": round(self.calibration_factor, 3),
         }
 
 
@@ -86,6 +111,12 @@ def strategy_edge_stats(
         avg_win_pay = sum(win_payouts) / n_hits if n_hits else 0.0
         hit_rate = n_hits / n
         b = (avg_win_pay / avg_stake - 1.0) if avg_stake > 0 else 0.0
+        model_probs = [
+            float(p.model_prob_pct) / 100.0
+            for p in rows if p.model_prob_pct is not None
+        ]
+        avg_model_prob = sum(model_probs) / len(model_probs) if model_probs else 0.0
+        calibration = (hit_rate / avg_model_prob) if avg_model_prob > 0 else 1.0
         out[strat] = StrategyEdgeStats(
             strategy=strat,
             n_graded=n,
@@ -94,6 +125,8 @@ def strategy_edge_stats(
             avg_winning_payout_tl=avg_win_pay,
             avg_stake_tl=avg_stake,
             avg_b=b,
+            avg_model_prob=avg_model_prob,
+            calibration_factor=calibration,
         )
     return out
 

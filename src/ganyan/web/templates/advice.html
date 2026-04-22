@@ -88,10 +88,10 @@
                     <th>Strategy</th>
                     <th class="text-end">Graded n</th>
                     <th class="text-end">Hit rate</th>
-                    <th class="text-end">Avg stake</th>
+                    <th class="text-end">Avg model p</th>
+                    <th class="text-end" title="hit_rate / avg_model_prob — 1.0 means calibrated">Cal factor</th>
                     <th class="text-end">Avg winning payout</th>
                     <th class="text-end">avg_b</th>
-                    <th class="text-end">¼-Kelly @10K</th>
                 </tr>
             </thead>
             <tbody>
@@ -100,10 +100,10 @@
                     <td><code>{{ strat }}</code></td>
                     <td class="text-end">{{ es.n_graded }} ({{ es.n_hits }} hits)</td>
                     <td class="text-end">{{ "{:.1%}".format(es.hit_rate) }}</td>
-                    <td class="text-end">{{ "{:,.0f}".format(es.avg_stake_tl) }}</td>
+                    <td class="text-end text-muted">{{ "{:.2%}".format(es.avg_model_prob) }}</td>
+                    <td class="text-end">{{ "{:.2f}×".format(es.calibration_factor) }}</td>
                     <td class="text-end">{{ "{:,.0f}".format(es.avg_winning_payout_tl) }}</td>
                     <td class="text-end">{{ "{:.2f}".format(es.avg_b) }}</td>
-                    <td class="text-end">{{ "{:,.0f}".format(es.kelly_quarter_10k) }} TL</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -143,7 +143,8 @@
                 <tr>
                     <th>Strategy</th>
                     <th>Combination</th>
-                    <th class="text-end">Model prob</th>
+                    <th class="text-end" title="Raw Harville joint probability">Raw p</th>
+                    <th class="text-end" title="Calibrated to empirical hit rate">Cal. p</th>
                     <th class="text-end">Base stake</th>
                     <th class="text-end">Kelly</th>
                     <th>Result</th>
@@ -154,11 +155,14 @@
                 <tr {% if pick.hit %}class="table-success"{% elif pick.is_miss %}class="table-warning"{% endif %}>
                     <td><code>{{ pick.strategy }}</code></td>
                     <td><small>{{ pick.combination_display }}</small></td>
-                    <td class="text-end">{{ "{:.1f}%".format(pick.model_prob_pct) }}</td>
+                    <td class="text-end text-muted">{{ "{:.2f}%".format(pick.model_prob_pct) }}</td>
+                    <td class="text-end">
+                        <strong>{{ "{:.1f}%".format(pick.calibrated_prob_pct) }}</strong>
+                    </td>
                     <td class="text-end">{{ "{:,.0f}".format(pick.stake_tl) }} TL</td>
                     <td class="text-end">
                         {% if pick.kelly_tl and pick.kelly_tl > 0 %}
-                            {{ "{:,.0f}".format(pick.kelly_tl) }} TL
+                            <strong>{{ "{:,.0f}".format(pick.kelly_tl) }} TL</strong>
                         {% else %}
                             <span class="text-muted">skip</span>
                         {% endif %}

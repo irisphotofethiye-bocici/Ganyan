@@ -1132,9 +1132,12 @@ def advice_dashboard():
                 stake = float(p.stake_tl)
                 stats = edge_stats.get(p.strategy)
                 kelly_tl = 0.0
-                if stats and stats.avg_b > 0 and stats.hit_rate > 0:
+                calibrated_prob_pct = 0.0
+                if stats and stats.avg_b > 0 and stats.avg_model_prob > 0:
+                    calibrated_p = stats.calibrate(prob / 100.0)
+                    calibrated_prob_pct = calibrated_p * 100
                     kelly_tl = suggested_stake_tl(
-                        win_prob=stats.hit_rate,
+                        win_prob=calibrated_p,
                         b=stats.avg_b,
                         bankroll_tl=bankroll,
                         base_stake_tl=stake,
@@ -1164,6 +1167,7 @@ def advice_dashboard():
                         p.combination_names or [],
                     ),
                     "model_prob_pct": prob,
+                    "calibrated_prob_pct": calibrated_prob_pct,
                     "stake_tl": stake,
                     "kelly_tl": kelly_tl,
                     "hit": bool(p.hit) if p.graded else False,
