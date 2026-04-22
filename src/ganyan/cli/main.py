@@ -1435,6 +1435,103 @@ def picks_cmd(
             typer.echo(_fmt(k, summary[k]))
 
 
+@app.command("morning")
+def morning_cmd(
+    grade: bool = typer.Option(
+        True, "--grade/--no-grade",
+        help="Also grade any already-resulted races at the end (default: yes).",
+    ),
+) -> None:
+    """One-shot morning flow: scrape today's cards → predict → generate picks.
+
+    Mirrors what the scheduler's ``morning_card`` job does at 08:30.  Use
+    when the scheduler hasn't fired yet (early morning, Postgres was
+    down, fresh environment) so /advice has something to show.
+    """
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+
+    from datetime import date as _date
+    import asyncio
+    from sqlalchemy import func
+
+    from ganyan.db import get_session
+    from ganyan.db.models import Race, RaceEntry, ScrapeStatus
+    from ganyan.scraper import TJKClient, parse_race_card
+    from ganyan.scraper.backfill import log_scrape, store_race_card
+    from ganyan.predictor.ml import MLPredictor
+    from ganyan.predictor.picks import generate_picks_for_race, grade_all_pending
+
+    today = _date.today()
+
+    async def _scrape() -> int:
+        session = get_session()
+        stored = 0
+        try:
+            async with TJKClient(
+                base_url=settings.tjk_base_url, delay=settings.scrape_delay,
+            ) as client:
+                raw = await client.get_race_card(today)
+                for card in raw:
+                    parsed = parse_race_card(card)
+                    store_race_card(session, parsed)
+                    log_scrape(
+                        session, today, parsed.track_name,
+                        ScrapeStatus.success,
+                    )
+                    stored += 1
+                session.commit()
+        finally:
+            session.close()
+        return stored
+
+    typer.echo(f"[1/3] scraping race cards for {today}...")
+    try:
+        n_cards = asyncio.run(_scrape())
+        typer.echo(f"      stored {n_cards} race card(s)")
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"      scrape failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"[2/3] generating ML predictions + picks for today's races...")
+    session = get_session()
+    picks_created = 0
+    predicted = 0
+    try:
+        predictor = MLPredictor(session)
+        races = (
+            session.query(Race).join(RaceEntry)
+            .filter(Race.date == today)
+            .group_by(Race.id)
+            .having(func.count(RaceEntry.id) >= 3)
+            .all()
+        )
+        for r in races:
+            try:
+                predictor.predict_and_save(r.id)
+                picks_created += len(generate_picks_for_race(session, r.id))
+                session.commit()
+                predicted += 1
+            except Exception as exc:  # noqa: BLE001
+                session.rollback()
+                typer.echo(f"      race {r.id} failed: {exc}", err=True)
+        typer.echo(f"      predicted {predicted} race(s), "
+                   f"created {picks_created} pick(s)")
+
+        if grade:
+            typer.echo(f"[3/3] grading any already-resulted races...")
+            n = grade_all_pending(session)
+            session.commit()
+            typer.echo(f"      graded {n} pick(s)")
+        else:
+            typer.echo(f"[3/3] grading skipped (--no-grade)")
+    finally:
+        session.close()
+
+    typer.echo(f"\nmorning flow complete for {today}.  "
+               f"Next: uv run ganyan advice")
+
+
 @app.command("advice")
 def advice_cmd(
     date_str: str = typer.Option(
@@ -1487,8 +1584,13 @@ def advice_cmd(
             .all()
         )
         if not races:
-            typer.echo(f"{target_date} için yarış bulunamadı. "
-                       f"Önce: uv run ganyan scrape --today")
+            typer.echo(f"{target_date} için yarış bulunamadı.")
+            if target_date == _date.today():
+                typer.echo(f"  → uv run ganyan morning "
+                           f"(scrape + predict + generate picks)")
+            else:
+                typer.echo(f"  → uv run ganyan scrape --backfill --rescrape "
+                           f"--from {target_date} --to {target_date}")
             return
 
         race_ids = [r.id for r in races]
