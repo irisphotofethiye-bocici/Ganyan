@@ -25,6 +25,50 @@
     (quarter-Kelly, varsayılan bankroll ≈10K TL).
 </div>
 
+{# TJK terminology cheatsheet — 2026-04-23 session learnings #}
+<details class="mb-3">
+    <summary class="text-muted small" style="cursor: pointer;">
+        🎫 TJK bahis rehberi (Kutu ≠ Komple, minimum stake'ler, bilet slip widget'ları) — tıkla
+    </summary>
+    <div class="mt-2 card card-body bg-light small">
+        <div class="row g-3">
+            <div class="col-md-6">
+                <strong>Strateji → TJK bahis türü</strong>
+                <table class="table table-sm mt-1 mb-2">
+                    <tbody>
+                        <tr><td><code>uclu_top1</code></td><td>Sıralı Üçlü Bahis (tek kombinasyon)</td><td class="text-end text-danger">min 20 TL</td></tr>
+                        <tr><td><code>uclu_box6</code></td><td>Sıralı Üçlü Bahis + aynı 3 atı 3 sütuna seç (otomatik Kutu 6)</td><td class="text-end">min ~12 TL</td></tr>
+                        <tr><td><code>sirali_ikili_top1</code></td><td>Sıralı İkili Bahis (tek kombinasyon)</td><td class="text-end">min ~2 TL</td></tr>
+                        <tr><td><code>ganyan_top1</code></td><td>Ganyan (sadece referans)</td><td class="text-end">min 1 TL</td></tr>
+                    </tbody>
+                </table>
+
+                <strong>Bilet slip widget'ları — tuzaklar</strong>
+                <ul class="mb-0">
+                    <li><strong>K toggle (yeşil):</strong> <span class="text-danger">Komple</span> — sahadaki tüm atları o sütuna ekler. <strong>KUTU DEĞİL.</strong> Dokunma.</li>
+                    <li><strong>Kutu:</strong> Ayrı buton yok. Aynı 3 atı 3 sütuna seçince sistem otomatik 6 permütasyona indirger.</li>
+                    <li><strong>Virgüllü:</strong> Bahis türü dropdown'ındaki alternatif giriş formatı, aynı havuz.</li>
+                    <li><strong>Bahis sayısı:</strong> pre-bet = benzersiz kombinasyon; post-bet = kombinasyon × misli (panik yok).</li>
+                </ul>
+            </div>
+            <div class="col-md-6">
+                <strong>Havuz türleri (dropdown'daki seçenekler)</strong>
+                <table class="table table-sm mt-1 mb-0">
+                    <tbody>
+                        <tr><td>Ganyan</td><td class="small text-muted">1. sıra</td></tr>
+                        <tr><td>Plase</td><td class="small text-muted">İlk 3'e</td></tr>
+                        <tr><td>İkili Bahis</td><td class="small text-muted">İlk 2 (sırasız)</td></tr>
+                        <tr><td>Sıralı İkili Bahis</td><td class="small text-muted">Tam 1-2</td></tr>
+                        <tr class="table-warning"><td>Sıralı Üçlü Bahis</td><td class="small"><strong>Bizim esas havuzumuz</strong> — tam 1-2-3</td></tr>
+                        <tr class="table-danger"><td>3'lü / 4'lü / 6'lı Ganyan</td><td class="small">Ardışık yarışların parlay'i — <strong>BİZİM DEĞİL</strong>, karıştırma!</td></tr>
+                        <tr><td>Çifte Bahis</td><td class="small text-muted">2 ardışık kazanan</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</details>
+
 <!-- Day summary -->
 <div class="row g-3 mb-4">
     <div class="col-md-3">
@@ -97,7 +141,10 @@
             <tbody>
                 {% for strat, es in edge_stats.items() %}
                 <tr>
-                    <td><code>{{ strat }}</code></td>
+                    <td>
+                        <div>{{ strat | strategy_tjk_short }}</div>
+                        <code class="text-muted small">{{ strat }}</code>
+                    </td>
                     <td class="text-end">{{ es.n_graded }} ({{ es.n_hits }} hits)</td>
                     <td class="text-end">{{ "{:.1%}".format(es.hit_rate) }}</td>
                     <td class="text-end text-muted">{{ "{:.2%}".format(es.avg_model_prob) }}</td>
@@ -153,7 +200,10 @@
             <tbody>
                 {% for pick in item.picks %}
                 <tr {% if pick.hit %}class="table-success"{% elif pick.is_miss %}class="table-warning"{% endif %}>
-                    <td><code>{{ pick.strategy }}</code></td>
+                    <td>
+                        <div class="small"><strong>{{ pick.strategy | strategy_tjk_short }}</strong></div>
+                        <code class="text-muted" style="font-size: 0.75em;">{{ pick.strategy }}</code>
+                    </td>
                     <td><small>{{ pick.combination_display }}</small></td>
                     <td class="text-end text-muted">{{ "{:.2f}%".format(pick.model_prob_pct) }}</td>
                     <td class="text-end">

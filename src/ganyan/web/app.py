@@ -59,6 +59,17 @@ def create_app(
     def inject_today():
         return {"today": date.today().isoformat()}
 
+    # TJK-aligned display names for strategy identifiers
+    from ganyan.predictor.terminology import (
+        min_stake_tl,
+        strategy_display,
+    )
+    app.jinja_env.filters["strategy_tjk"] = lambda s: strategy_display(s)
+    app.jinja_env.filters["strategy_tjk_short"] = lambda s: strategy_display(
+        s, short=True,
+    )
+    app.jinja_env.filters["min_stake_tl"] = min_stake_tl
+
     from ganyan.web.routes import bp
     app.register_blueprint(bp)
 

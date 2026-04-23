@@ -1345,6 +1345,7 @@ def picks_cmd(
     from datetime import datetime as _dt
     from ganyan.db import get_session
     from ganyan.predictor.picks import grade_all_pending, strategy_summary
+    from ganyan.predictor.terminology import strategy_display
 
     since_date = _dt.strptime(since, "%Y-%m-%d") if since else None
 
@@ -1380,13 +1381,16 @@ def picks_cmd(
     REFERENCE = {"ganyan_top1"}
 
     header = (
-        f"{'Strategy':<22} {'N':>5} {'Hits':>5} {'Hit%':>6} "
+        f"{'Strateji (TJK)':<28} {'N':>5} {'Hits':>5} {'Hit%':>6} "
         f"{'Stake':>11} {'Payout':>12} {'Net':>11} {'ROI':>8}"
     )
 
     def _fmt(strat_key: str, row: dict) -> str:
+        label = strategy_display(strat_key, short=True) if strat_key in (
+            "uclu_top1", "uclu_box6", "sirali_ikili_top1", "ganyan_top1"
+        ) else strat_key
         return (
-            f"{strat_key:<22} {row['n']:>5} {row['hits']:>5} "
+            f"{label:<28} {row['n']:>5} {row['hits']:>5} "
             f"{row['hit_rate_pct']:>5.1f}% "
             f"{row['stake_tl']:>11,.0f} {row['payout_tl']:>12,.0f} "
             f"{row['net_tl']:>11,.0f} {row['roi_pct']:>+7.1f}%"
@@ -1566,6 +1570,7 @@ def advice_cmd(
     from ganyan.db import get_session
     from ganyan.db.models import Race, Pick, RaceStatus
     from ganyan.predictor.kelly import strategy_edge_stats, suggested_stake_tl
+    from ganyan.predictor.terminology import strategy_display
     from sqlalchemy.orm import joinedload
 
     target_date = (
@@ -1685,7 +1690,16 @@ def advice_cmd(
         return
 
     # Text output
-    typer.echo(f"=== {target_date} BET ADVICE ({len(races)} races) ===\n")
+    typer.echo(f"=== {target_date} BET ADVICE ({len(races)} races) ===")
+    typer.echo(
+        "  Strateji kodları → TJK bahis türleri: "
+        "uclu_top1=Üçlü Tek · uclu_box6=Üçlü Kutu 6 · "
+        "sirali_ikili_top1=İkili Sıralı Tek"
+    )
+    typer.echo(
+        "  ⚠️  Sıralı Üçlü Bahis tek kombinasyon için TJK min 20 TL; "
+        "Kutu 6 için min ~12 TL.  (Kutu ≠ Komple/K toggle.)\n"
+    )
 
     total_stake_advised = 0.0      # what you'd pay if every pool formed
     total_stake_effective = 0.0    # stakes actually resolved (graded) or still pending
@@ -1780,8 +1794,10 @@ def advice_cmd(
                 else:
                     kelly_label = f"  kelly: {suggested:,.0f} TL"
 
+            strat_tjk = strategy_display(strat, short=True)
+            strat_col = f"{strat_tjk} ({strat})"
             typer.echo(
-                f"  [BET ] {strat:<20} {names}  prob {prob:>4.1f}%  "
+                f"  [BET ] {strat_col:<34} {names}  prob {prob:>4.1f}%  "
                 f"{bet_mark}{kelly_label}{outcome}"
             )
             total_stake_advised += stake

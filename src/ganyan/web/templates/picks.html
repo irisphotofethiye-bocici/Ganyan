@@ -27,10 +27,10 @@
 <!-- Summary cards -->
 <div class="row g-3 mb-4">
     {% set _strategy_labels = {
-        "ganyan_top1": "Ganyan Top-1 (referans)",
-        "uclu_top1": "Üçlü Top-1",
-        "uclu_box6": "Üçlü Kutu 6",
-        "sirali_ikili_top1": "Sıralı İkili Top-1"
+        "ganyan_top1": "Ganyan (referans)",
+        "uclu_top1": "Sıralı Üçlü Bahis · Tek Kombinasyon",
+        "uclu_box6": "Sıralı Üçlü Bahis · Kutu 6",
+        "sirali_ikili_top1": "Sıralı İkili Bahis · Tek Kombinasyon"
     } %}
     {% for strat_key, row in summary.items() | sort %}
     <div class="col-md-4">
@@ -97,7 +97,10 @@
                         <br><small class="text-muted">{{ r.date }}</small>
                     {% else %}#{{ p.race_id }}{% endif %}
                 </td>
-                <td class="small"><code>{{ p.strategy }}</code></td>
+                <td class="small">
+                    <div>{{ p.strategy | strategy_tjk_short }}</div>
+                    <code class="text-muted small">{{ p.strategy }}</code>
+                </td>
                 <td class="small">
                     {% if p.strategy.endswith('_box6') %}
                         {{ p.combination_names | join(' + ') }}
