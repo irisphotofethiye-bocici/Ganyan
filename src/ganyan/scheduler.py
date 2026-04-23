@@ -111,7 +111,11 @@ def _job_morning_card(settings: Settings) -> None:
         for race in races:
             try:
                 predictor.predict_and_save(race.id)
-                picks = generate_picks_for_race(session, race.id)
+                # refresh=True so intraday re-runs rewrite ungraded picks
+                # instead of silently no-op'ing on the morning snapshot.
+                picks = generate_picks_for_race(
+                    session, race.id, refresh=True,
+                )
                 picks_created += len(picks)
                 session.commit()
             except Exception:  # noqa: BLE001

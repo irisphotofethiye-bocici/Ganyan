@@ -325,6 +325,11 @@ def _predict_today(json_output: bool, model: str) -> None:
             predictions = predictor.predict_and_save(race.id)
             _display_predictions(predictions, race.id, json_output)
             typer.echo("")  # blank line separator
+        # Refresh picks so /advice reflects the fresh predictions rather
+        # than a stale morning snapshot.  Graded picks are preserved.
+        from ganyan.predictor.picks import refresh_picks_for_date
+        added = refresh_picks_for_date(session, date.today())
+        typer.echo(f"Refreshed picks: {added} new pick(s) written.")
         session.commit()
     finally:
         session.close()

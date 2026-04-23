@@ -106,7 +106,7 @@ _P_WEIGHT = f"td.{_P}-Kilo"
 _P_JOCKEY = f"td.{_P}-JokeAdi"
 _P_OWNER = f"td.{_P}-SahipAdi"
 _P_TRAINER = f"td.{_P}-AntronorAdi"
-_P_GATE = f"td.{_P}-StartId"
+_P_GATE = f"td.{_P}-SiraId"  # program NO (bet-slip number), NOT StartId (physical gate)
 _P_HP = f"td.{_P}-Hc"
 _P_LAST6 = f"td.{_P}-Son6Yaris"
 _P_KGS = f"td.{_P}-KGS"
@@ -128,7 +128,7 @@ _R_TRAINER = f"td.{_R}-AntronorAdi"
 _R_TIME = f"td.{_R}-Derece"
 _R_GNY = f"td.{_R}-Gny"
 _R_AGF = f"td.{_R}-AGFORAN"
-_R_GATE = f"td.{_R}-StartId"
+_R_GATE = f"td.{_R}-StartId"  # physical start gate (NOT used; we extract program NO from the name cell via _extract_program_no_from_name)
 _R_HP = f"td.{_R}-Hc"
 
 # Endpoints (relative to base_url)
@@ -320,6 +320,23 @@ def _extract_horse_name_results(td: Tag | None) -> str:
     raw = link.get_text(strip=True) if link else td.get_text(strip=True)
     cleaned = re.sub(r"\(\d+\)", "", raw)
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _extract_program_no_from_results_name(td: Tag | None) -> int | None:
+    """Extract program number NO from a results name cell.
+
+    Results cells embed the NO (program / bet-slip number) as ``(N)``
+    in the link text, e.g. ``"(7)SİDAR BEY"`` or ``"FORTHCOMING QUEEN(3)"``.
+    The results page also has a ``-StartId`` column with the physical
+    start gate, but that is NOT what bet slips use — bet slips use NO.
+    Returns the first ``(\\d+)`` group found, or None if no such group.
+    """
+    if td is None:
+        return None
+    link = td.select_one("a")
+    raw = link.get_text(strip=True) if link else td.get_text(strip=True)
+    m = re.search(r"\((\d+)\)", raw)
+    return int(m.group(1)) if m else None
 
 
 def _extract_eid(td: Tag | None) -> str | None:
@@ -1127,7 +1144,10 @@ class TJKClient:
             origin=_extract_text(row.select_one(_R_ORIGIN)) or None,
             owner=_extract_link_text(row.select_one(_R_OWNER)) or None,
             trainer=_extract_link_text(row.select_one(_R_TRAINER)) or None,
-            gate_number=_safe_int(_extract_text(row.select_one(_R_GATE))),
+            # Use program NO (embedded in name cell as "(N)") — matches bet slips.
+            # Previously used _R_GATE (-StartId) which is the physical start gate,
+            # a different numbering system from the bet-slip / grading reference.
+            gate_number=_extract_program_no_from_results_name(name_cell),
             jockey=_extract_link_text(row.select_one(_R_JOCKEY)) or None,
             weight_kg=_safe_float(_extract_text(row.select_one(_R_WEIGHT))),
             hp=_safe_float(_extract_text(row.select_one(_R_HP))),

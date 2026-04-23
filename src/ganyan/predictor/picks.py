@@ -41,14 +41,23 @@ STRATEGIES = ("ganyan_top1", "uclu_top1", "uclu_box6", "sirali_ikili_top1")
 
 
 def generate_picks_for_race(
-    session: Session, race_id: int,
+    session: Session, race_id: int, *, refresh: bool = False,
 ) -> list[Pick]:
     """Generate (or refresh) this race's picks from stored predictions.
 
     Reads ``RaceEntry.predicted_probability`` — written by the
     predictor's ``predict_and_save`` — and derives Harville joint
-    probabilities.  Safe to call repeatedly; existing rows are
-    untouched, missing ones are inserted.
+    probabilities.
+
+    When ``refresh`` is False (default), safe to call repeatedly;
+    existing rows are untouched, missing ones are inserted.
+
+    When ``refresh`` is True, **ungraded** picks (those without a
+    settled hit/payout) are deleted and regenerated from the current
+    predictions.  Already-graded picks are preserved as historical
+    truth of what we actually staked.  Use this after a re-predict
+    (e.g. surface change, fresh scrape) to keep picks in sync with
+    the latest probabilities.
     """
     race = session.get(Race, race_id)
     if race is None:
@@ -65,6 +74,18 @@ def generate_picks_for_race(
             name_for[e.horse_id] = e.horse.name if e.horse else "?"
     if sum(win_probs.values()) <= 0:
         return []
+
+    if refresh:
+        # Delete ungraded picks so we can regenerate from fresh probs.
+        # An "ungraded" pick is one whose hit field is still NULL —
+        # i.e. the race hasn't been graded yet, or the pick was
+        # generated for a pool that hadn't formed at grade time.
+        (
+            session.query(Pick)
+            .filter(Pick.race_id == race_id, Pick.hit.is_(None))
+            .delete(synchronize_session=False)
+        )
+        session.flush()
 
     existing = {
         p.strategy: p for p in
@@ -139,6 +160,30 @@ def generate_picks_for_race(
         session.add(p)
     session.flush()
     return added
+
+
+def refresh_picks_for_date(session: Session, target_date) -> int:
+    """Delete ungraded picks for a date and regenerate from current predictions.
+
+    Use after a re-predict (intraday surface change, fresh scrape, etc.)
+    so the ``picks`` table reflects the latest probabilities rather than
+    the morning snapshot.  Graded picks (races whose hit/payout is
+    already settled) are preserved as historical truth.
+
+    Returns the total number of picks newly inserted.
+    """
+    from ganyan.db.models import Race
+    races = (
+        session.query(Race)
+        .filter(Race.date == target_date)
+        .all()
+    )
+    total_added = 0
+    for race in races:
+        added = generate_picks_for_race(session, race.id, refresh=True)
+        total_added += len(added)
+    session.flush()
+    return total_added
 
 
 def _make_pick(
