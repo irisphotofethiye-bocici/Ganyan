@@ -331,7 +331,8 @@ class TestGetRaceCard:
         assert h1.jockey == "M.ÇELİK"
         assert h1.owner == "AHMET BABACAN"
         assert h1.trainer == "M.TEK"
-        assert h1.gate_number == 2
+        # gate_number is the program NO (SiraId), not physical StartId
+        assert h1.gate_number == 1
         assert h1.hp == 7.0
         assert h1.kgs == 22
         assert h1.s20 == 17.0
@@ -345,7 +346,9 @@ class TestGetRaceCard:
         assert h2.name == "STORM RIDER"
         assert h2.age == 3
         assert h2.weight_kg == 57.5
-        assert h2.gate_number == 5  # "5DS" -> 5
+        # gate_number is SiraId (program NO), so this is 2 regardless of
+        # the "5DS" string in the StartId column.
+        assert h2.gate_number == 2
         assert h2.eid is None
         assert h2.gny is None
         assert h2.agf is None
@@ -486,7 +489,9 @@ class TestGetRaceResults:
         assert h1.finish_time == "1.36.69"
         assert h1.age == 3
         assert h1.weight_kg == 57.5
-        assert h1.gate_number == 8
+        # gate_number is the program NO embedded in the name cell "(3)",
+        # not the physical StartId column (which says 8).
+        assert h1.gate_number == 3
         assert h1.gny == 3.4
         assert h1.agf == 17.0
         assert h1.hp == 52.0

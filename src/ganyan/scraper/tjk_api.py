@@ -650,15 +650,37 @@ class TJKClient:
             is_results=False,
         )
 
-    async def get_race_results(self, race_date: date) -> list[RawRaceCard]:
+    async def get_race_results(
+        self, race_date: date, *, max_retries: int = 2, retry_delay_s: float = 1.5,
+    ) -> list[RawRaceCard]:
         """Fetch race results for *race_date*. Returns list of RawRaceCard
-        with finish_position and finish_time populated on each horse."""
-        cards, _failures = await self._fetch_races(
-            page_url=_RESULTS_PAGE,
-            city_url=_RESULTS_CITY,
-            race_date=race_date,
-            is_results=True,
-        )
+        with finish_position and finish_time populated on each horse.
+
+        TJK's results endpoint sometimes returns a page with race-header
+        divs but no horse tables yet (mid-publish state).  We retry up
+        to ``max_retries`` times with ``retry_delay_s`` between attempts
+        when the response has race_details but no tables — this is a
+        known transient that self-heals in seconds.
+        """
+        import asyncio
+
+        for attempt in range(max_retries + 1):
+            cards, _failures = await self._fetch_races(
+                page_url=_RESULTS_PAGE,
+                city_url=_RESULTS_CITY,
+                race_date=race_date,
+                is_results=True,
+            )
+            if cards:
+                return cards
+            if attempt < max_retries:
+                logger.info(
+                    "get_race_results empty for %s, retrying in %.1fs "
+                    "(attempt %d/%d) — TJK may still be publishing",
+                    race_date, retry_delay_s,
+                    attempt + 1, max_retries,
+                )
+                await asyncio.sleep(retry_delay_s)
         return cards
 
     async def get_race_results_with_failures(
