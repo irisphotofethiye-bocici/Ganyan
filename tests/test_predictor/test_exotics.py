@@ -69,12 +69,30 @@ def test_sirali_ikili_excludes_same_horse():
 
 
 def test_ikili_equals_sum_of_both_orders():
-    """P({i,j} top 2) = P(i,j) + P(j,i)"""
+    """P({i,j} top 2) = P(i,j) + P(j,i) under pure Harville.
+
+    Only holds when ikili and sirali_ikili use the same underlying
+    probability vector — i.e. when Henery place-shrinkage is disabled
+    (``place_lambda=1.0``).  The default calibrated ikili deliberately
+    breaks this identity because place markets need the correction.
+    """
     ordered = {c.horses: c.probability for c in sirali_ikili_probabilities(WIN_PROBS)}
-    for c in ikili_probabilities(WIN_PROBS):
+    for c in ikili_probabilities(WIN_PROBS, place_lambda=1.0):
         i, j = c.horses
         expected = ordered.get((i, j), 0) + ordered.get((j, i), 0)
         assert _approx(c.probability, expected)
+
+
+def test_ikili_henery_shrinkage_pulls_from_favourite():
+    """Default λ<1 should reduce the top combo's probability vs pure Harville.
+
+    Favourites are overweighted by pure Harville in place markets; the
+    default shrinkage corrects that, so the top-ranked ikili combo must
+    come out *smaller* than under ``place_lambda=1.0``.
+    """
+    default_top = ikili_probabilities(WIN_PROBS)[0].probability
+    raw_top = ikili_probabilities(WIN_PROBS, place_lambda=1.0)[0].probability
+    assert default_top < raw_top
 
 
 def test_ikili_sum_equals_one():

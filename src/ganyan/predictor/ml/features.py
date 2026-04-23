@@ -66,7 +66,9 @@ FEATURE_COLUMNS: list[str] = [
     # Race-level context.
     "distance_meters",
     "field_size",
-    # Surface encoded as 1 for kum, 0 for çim, -1 for unknown/other.
+    # Surface: 1.0 kum, 0.0 çim, NaN unknown (lets LightGBM's missing-
+    # value branch handle "not yet published / weird surface" rather
+    # than bucketing it with Sentetik under a shared sentinel.
     "surface_is_kum",
 ]
 
@@ -93,15 +95,23 @@ class TrainingFrame:
         return self.groups.groupby(self.groups, sort=False).size().to_numpy()
 
 
-def _surface_encode(surface: str | None) -> int:
+def _surface_encode(surface: str | None) -> float:
+    """Encode surface as 1 (kum), 0 (çim), NaN (unknown/other).
+
+    NaN is intentional — LightGBM has a dedicated missing-value branch
+    per split, so "surface not known yet" is distinguishable from a
+    third surface class.  Previously we encoded both as ``-1``, which
+    let the tree learn a conditional that conflated missing data with
+    the Sentetik surface.
+    """
     if surface is None:
-        return -1
+        return np.nan
     s = surface.lower()
     if s.startswith("kum"):
-        return 1
+        return 1.0
     if s.startswith("çim") or s.startswith("cim"):
-        return 0
-    return -1
+        return 0.0
+    return np.nan
 
 
 def build_training_frame(
@@ -153,9 +163,13 @@ def build_training_frame(
         weights = [float(e.weight_kg) for e in entries if e.weight_kg is not None]
         hps = [float(e.hp) for e in entries if e.hp is not None]
         s20s = [float(e.s20) for e in entries if e.s20 is not None]
-        field_avg_weight = sum(weights) / len(weights) if weights else None
-        field_avg_hp = sum(hps) / len(hps) if hps else None
-        field_avg_s20 = sum(s20s) / len(s20s) if s20s else None
+        # Match the bayesian predictor: relative features (class_indicator,
+        # s20_edge, weight_delta) need at least half the field covered or
+        # the "average" is a 1–2 horse fluke.
+        cov = max(2, int(len(entries) * 0.5))
+        field_avg_weight = sum(weights) / len(weights) if len(weights) >= cov else None
+        field_avg_hp = sum(hps) / len(hps) if len(hps) >= cov else None
+        field_avg_s20 = sum(s20s) / len(s20s) if len(s20s) >= cov else None
         field_size = len(entries)
         # Compute race-level pace density once per race from every
         # horse's last_six string — same for every row in this race.

@@ -1,4 +1,20 @@
-"""Bayesian prediction engine for horse racing."""
+"""Hand-tuned log-linear ranker (named "Bayesian" for legacy reasons).
+
+Despite the module name, this is not Bayesian inference: there are no
+priors fit on w, no posterior samples, no credible intervals.  The
+prior ``1/n`` is uniform across entries in a race so it factors out of
+the normalisation; what remains is::
+
+    p_i = softmax_i(Σ_k FEATURE_WEIGHTS[k] · impact_k(horse_i))
+
+i.e. a hand-tuned multinomial logit over the field.  It is documented
+here so downstream code (Kelly sizing, calibration) doesn't
+misinterpret the raw output as a calibrated win probability — it is
+not calibrated without an explicit calibration layer.  See
+:mod:`ganyan.predictor.ml.predictor` + temperature scaling and
+:func:`ganyan.predictor.kelly.strategy_edge_stats` for the empirical
+calibration that actually feeds sizing.
+"""
 
 import math
 from dataclasses import dataclass, field
@@ -12,7 +28,15 @@ from ganyan.scraper.parser import parse_eid_to_seconds, parse_last_six
 
 # Bump this when the feature set, weights, or formula change so the
 # predictions audit table can distinguish results across model variants.
-MODEL_VERSION = "bayesian-v5-s20"
+MODEL_VERSION = "softmax-v6-s20"
+
+
+# Relative features (class_indicator, s20_edge) divide by a field
+# average.  When only a tiny fraction of the field has the underlying
+# value, that "average" is of 1–2 horses and becomes a fragile anchor —
+# a single outlier HP distorts every other entry's class signal.  Gate
+# the relative features behind this coverage floor.
+_FIELD_AVG_MIN_COVERAGE = 0.5
 
 
 # Feature weights for likelihood computation.
@@ -33,6 +57,15 @@ MODEL_VERSION = "bayesian-v5-s20"
 # of AGF.  v5 adds ``s20`` at weight 0.10, funded from AGF (-0.05) and
 # class/jockey (-0.05 combined).  Zero-weighted factors from v4 remain
 # zero-weighted.
+#
+# v6-pending (2026-04-24): ``parse_last_six`` was silently broken —
+# split-on-whitespace returned [None] for the production digit-packed
+# format ("212464" etc.) so ``compute_form_cycle`` was always None for
+# every row the v4/v5 audits saw.  After fixing the parser, 100% of
+# rows now produce a real form value.  The v4/v5 "form has no signal"
+# conclusion was measuring a constant-None feature, not an actually
+# computed one — TODO: re-audit correlations with the fixed parser
+# before keeping ``form``/``rest`` at zero.
 FEATURE_WEIGHTS: dict[str, float] = {
     "agf": 0.50,
     "class": 0.13,
@@ -106,13 +139,26 @@ class BayesianPredictor:
         if not entries:
             return []
 
-        # Compute field averages for relative features.
+        # Compute field averages for relative features.  Relative features
+        # (class_indicator, s20_edge, weight_delta) are only meaningful
+        # when the field average is drawn from a representative subset.
+        # A ``field_avg_hp`` of 2 horses in an 8-runner field gives every
+        # other entry a spurious "class_indicator" signal.  Require at
+        # least _FIELD_AVG_MIN_COVERAGE of the field.
+        n_total = len(entries)
+        coverage_floor = max(2, int(n_total * _FIELD_AVG_MIN_COVERAGE))
         weights = [float(e.weight_kg) for e in entries if e.weight_kg is not None]
         hps = [float(e.hp) for e in entries if e.hp is not None]
         s20s = [float(e.s20) for e in entries if e.s20 is not None]
-        field_avg_weight = sum(weights) / len(weights) if weights else None
-        field_avg_hp = sum(hps) / len(hps) if hps else None
-        field_avg_s20 = sum(s20s) / len(s20s) if s20s else None
+        field_avg_weight = (
+            sum(weights) / len(weights) if len(weights) >= coverage_floor else None
+        )
+        field_avg_hp = (
+            sum(hps) / len(hps) if len(hps) >= coverage_floor else None
+        )
+        field_avg_s20 = (
+            sum(s20s) / len(s20s) if len(s20s) >= coverage_floor else None
+        )
 
         distance = race.distance_meters
 

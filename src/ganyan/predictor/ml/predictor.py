@@ -34,6 +34,10 @@ class LoadedModel:
     booster: lgb.Booster
     feature_columns: list[str]
     model_version: str
+    # Within-race softmax temperature fitted on the training holdout.
+    # Defaults to ``1.0`` for legacy models trained before calibration
+    # was added — those models are uncalibrated but still rank-usable.
+    softmax_temperature: float = 1.0
     metadata: dict = field(default_factory=dict)
 
 
@@ -63,10 +67,12 @@ def load_latest_model(
         f"{ML_MODEL_VERSION_PREFIX}-it{best_iter}"
         if best_iter is not None else ML_MODEL_VERSION_PREFIX
     )
+    temperature = float(metadata.get("softmax_temperature", 1.0) or 1.0)
     return LoadedModel(
         booster=booster,
         feature_columns=feature_columns,
         model_version=model_version,
+        softmax_temperature=temperature,
         metadata=metadata,
     )
 
@@ -116,10 +122,11 @@ class MLPredictor:
         X = frame[feature_cols].astype("float64")
         raw_scores = self.model.booster.predict(X)
 
-        # Within-race softmax.  LightGBM's rank scores are
-        # unnormalised log-preferences; exponentiating and normalising
-        # is the standard way to turn them into a probability simplex.
-        probs = _softmax(raw_scores)
+        # Within-race softmax with the training-time fitted temperature.
+        # LambdaRank margins have an arbitrary scale; ``T`` was chosen
+        # on the holdout to minimise NLL so the normalised probabilities
+        # are aggregate-calibrated (not just rank-correct).
+        probs = _softmax(raw_scores, temperature=self.model.softmax_temperature)
 
         # Map back to entries so we can get horse.name.
         entries_by_id = {e.horse_id: e for e in race.entries}
@@ -174,11 +181,17 @@ class MLPredictor:
         return preds
 
 
-def _softmax(x: np.ndarray) -> np.ndarray:
-    """Numerically-stable softmax (subtracts max before exp)."""
+def _softmax(x: np.ndarray, temperature: float = 1.0) -> np.ndarray:
+    """Numerically-stable softmax with optional temperature scaling.
+
+    ``temperature > 1`` flattens the distribution (less confident);
+    ``< 1`` sharpens it.  ``T = 1`` is the identity.
+    """
     if len(x) == 0:
         return x
-    shifted = x - np.max(x)
+    t = max(float(temperature), 1e-6)
+    scaled = np.asarray(x, dtype=float) / t
+    shifted = scaled - scaled.max()
     exps = np.exp(shifted)
     return exps / exps.sum()
 

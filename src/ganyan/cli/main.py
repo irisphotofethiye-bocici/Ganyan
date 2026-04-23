@@ -1585,7 +1585,11 @@ def advice_cmd(
 
     session = get_session()
     try:
-        edge_stats = strategy_edge_stats(session, strategies=BETTING_STRATEGIES)
+        edge_stats = strategy_edge_stats(
+            session,
+            strategies=BETTING_STRATEGIES,
+            before_date=target_date,
+        )
         races = (
             session.query(Race)
             .options(joinedload(Race.track), joinedload(Race.entries))

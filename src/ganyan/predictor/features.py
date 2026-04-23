@@ -410,25 +410,20 @@ def compute_equipment_changed(
     return 1.0 if norm_prev != norm_curr else 0.0
 
 
-# Turkish apprentice jockeys typically appear with a trailing " A" or
-# asterisk suffix on TJK.  In our data the jockey name field shows the
-# name as a bare string (the apprentice tooltip is stripped during
-# parsing) — we match on heuristic patterns that still survive.
-_APPRENTICE_NAME_RE = re.compile(
-    r"(\bA\.|\bAPA\b|\bapr\b)", re.IGNORECASE,
-)
-
-
 def compute_apprentice_jockey(jockey: str | None) -> float | None:
-    """1 if jockey name looks like an apprentice; 0 otherwise.
+    """Return ``None`` until the scraper preserves apprentice markers.
 
-    Heuristic — our scrape already strips the explanatory <sup> so we
-    can only go on the surviving name string.  Low-precision feature
-    but cheap to compute.
+    The TJK page marks apprentices with a ``<sup>`` superscript inside
+    the jockey cell, but the parser currently strips that tag before
+    storing the name.  The previous heuristic regex (``\\bA\\.``) matched
+    the initial of any jockey named "A. X" — a false-positive magnet
+    that taught the LightGBM ranker a spurious signal keyed on first
+    initials.  Until the scrape preserves a real ``is_apprentice`` bit,
+    this feature yields no information, so we return ``None`` (which
+    LightGBM's missing-value handler treats as an explicit NA rather
+    than a noisy 0/1 label).
     """
-    if not jockey:
-        return None
-    return 1.0 if _APPRENTICE_NAME_RE.search(jockey) else 0.0
+    return None
 
 
 def compute_field_pace_density(
@@ -441,9 +436,15 @@ def compute_field_pace_density(
     with >=3 top-3 finishes is treated as a likely front-runner.  The
     returned value is ``front_runners / field_size`` — higher means a
     speed-duel scenario, which classically favours closers.
+
+    Denominator is the *full field*, not just horses with history.  Two
+    first-timers alongside one speed horse shouldn't read as a 1.0 pace
+    duel; it's 1/3.  Returns ``None`` only when the entire field has no
+    history (can't judge pace at all).
     """
     if not last_six_by_horse:
         return None
+    field_size = len(last_six_by_horse)
     valid = [ls for ls in last_six_by_horse if ls]
     if not valid:
         return None
@@ -452,7 +453,7 @@ def compute_field_pace_density(
         top3 = sum(1 for p in ls if p is not None and p <= 3)
         if top3 >= 3:
             front_runners += 1
-    return front_runners / len(valid)
+    return front_runners / field_size
 
 
 def _bayesian_smoothed_rate(wins: int, runs: int) -> float:

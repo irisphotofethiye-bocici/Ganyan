@@ -107,6 +107,80 @@ def _temporal_split(
     return _slice(train_mask), _slice(test_mask)
 
 
+def _fit_temperature(
+    model: lgb.Booster, frame: TrainingFrame,
+) -> float:
+    """Fit a single scalar ``T`` minimising NLL of the within-race softmax.
+
+    LambdaRank margins have an arbitrary scale — one booster might output
+    scores in ``[-2, 4]`` and another in ``[-0.3, 0.6]`` for the same
+    underlying belief.  A raw softmax on those scales is wildly over- or
+    under-confident, and Kelly sizing downstream cares a great deal about
+    calibration.  Fitting one scalar temperature on the holdout
+    (Guo et al., 2017, "On Calibration of Modern Neural Networks" —
+    simple Platt scaling for multi-class) corrects the aggregate
+    confidence without touching the ranking.
+
+    Optimises NLL over ``T ∈ [0.05, 20]`` via golden-section search on
+    ``log T`` — one scalar, convex objective, 40 evaluations is enough
+    for 1e-4 precision.  Returns ``1.0`` if holdout is empty or has no
+    identifiable winner per race.
+    """
+    if frame.features.empty:
+        return 1.0
+
+    raw = model.predict(frame.features)
+    df = frame.features.copy()
+    df["_score"] = raw
+    df["_target"] = frame.target.values
+    df["_race"] = frame.groups.values
+
+    race_blocks: list[tuple[np.ndarray, int]] = []
+    for _race_id, race_df in df.groupby("_race", sort=False):
+        scores = race_df["_score"].to_numpy(dtype=float)
+        targets = race_df["_target"].to_numpy()
+        winner_target = targets.max()
+        winner_rows = np.where(targets == winner_target)[0]
+        if winner_rows.size == 0:
+            continue
+        race_blocks.append((scores, int(winner_rows[0])))
+    if not race_blocks:
+        return 1.0
+
+    def nll(t: float) -> float:
+        total = 0.0
+        for scores, widx in race_blocks:
+            shifted = scores / t
+            shifted -= shifted.max()
+            exps = np.exp(shifted)
+            p_w = exps[widx] / exps.sum()
+            # Clamp to avoid log(0) when the booster is astronomically
+            # confident against the winner on the holdout.
+            total -= float(np.log(max(p_w, 1e-12)))
+        return total
+
+    # Golden-section search on log-T in [log 0.05, log 20] ≈ [-3, 3].
+    a, b = -3.0, 3.0
+    phi = (1 + 5**0.5) / 2
+    resphi = 2 - phi
+    tol = 1e-4
+    x1 = a + resphi * (b - a)
+    x2 = b - resphi * (b - a)
+    f1 = nll(float(np.exp(x1)))
+    f2 = nll(float(np.exp(x2)))
+    while abs(b - a) > tol:
+        if f1 < f2:
+            b, x2, f2 = x2, x1, f1
+            x1 = a + resphi * (b - a)
+            f1 = nll(float(np.exp(x1)))
+        else:
+            a, x1, f1 = x1, x2, f2
+            x2 = b - resphi * (b - a)
+            f2 = nll(float(np.exp(x2)))
+    t_star = float(np.exp((a + b) / 2))
+    return max(0.05, min(t_star, 20.0))
+
+
 def _evaluate_ranker(
     model: lgb.Booster, frame: TrainingFrame,
 ) -> dict[str, float]:
@@ -249,6 +323,12 @@ def train_ranker(
     )
 
     metrics = _evaluate_ranker(booster, test)
+    # Fit the within-race softmax temperature on holdout.  Persisted
+    # alongside the booster; MLPredictor reads it back and applies
+    # ``raw / T`` before the softmax so downstream Kelly sizing gets
+    # calibrated (not arbitrary-scaled) probabilities.
+    temperature = _fit_temperature(booster, test)
+    metrics["softmax_temperature"] = temperature
 
     # Save model + metadata.
     model_path = model_dir / f"{model_name}.txt"
@@ -281,6 +361,7 @@ def train_ranker(
         "feature_importance": feature_importance,
         "num_boost_round": num_boost_round,
         "best_iteration": booster.best_iteration or num_boost_round,
+        "softmax_temperature": temperature,
     }
     meta_path.write_text(json.dumps(metadata, indent=2, default=str))
 

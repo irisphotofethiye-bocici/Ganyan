@@ -44,9 +44,20 @@ class EvaluationSummary:
     avg_winner_probability: float  # average probability we assigned to winner
     log_loss: float  # lower is better
     brier_score: float  # proper multiclass scoring rule (lower is better)
-    random_baseline_top1: float  # expected accuracy from uniform random picking
-    agf_baseline_top1: float | None  # top-1 accuracy of the AGF (market) leader
-    roi_simulation: float  # return on flat-bet top pick (synthetic odds)
+    # Expected Calibration Error — |mean_pred − actual| weighted by bucket
+    # count, averaged over reliability buckets.  Single-scalar summary of
+    # the reliability diagram.  Values in 0..100 (same units as the bucket
+    # probabilities).  Low ECE + low Brier = actually trust the probs for
+    # Kelly sizing.
+    expected_calibration_error: float = 0.0
+    # Zero-hit-day probability estimate for the picks ledger.  Computed
+    # when the evaluated window covers multiple race days; None otherwise.
+    # Reported alongside ROI because the user explicitly wants variance
+    # cited before headlines (see feedback_honest_measurement.md).
+    zero_hit_day_rate: float | None = None
+    random_baseline_top1: float = 0.0  # expected accuracy from uniform random picking
+    agf_baseline_top1: float | None = None  # top-1 accuracy of the AGF (market) leader
+    roi_simulation: float = 0.0  # return on flat-bet top pick (synthetic odds)
     calibration: list[CalibrationBucket] = field(default_factory=list)
     cutoff_date: date_type | None = None  # earliest race date evaluated
     skipped_unresulted: int = 0  # races without finish data
@@ -255,6 +266,8 @@ def evaluate_all(
     calibration = _compute_calibration(
         session, evaluations, num_bins=num_calibration_bins,
     )
+    ece = _expected_calibration_error(calibration)
+    zero_hit = _zero_hit_day_rate(evaluations)
 
     summary = EvaluationSummary(
         total_races=total,
@@ -264,6 +277,8 @@ def evaluate_all(
         avg_winner_probability=avg_prob,
         log_loss=log_loss,
         brier_score=brier_score,
+        expected_calibration_error=ece,
+        zero_hit_day_rate=zero_hit,
         random_baseline_top1=random_baseline,
         agf_baseline_top1=agf_baseline,
         roi_simulation=roi,
@@ -273,6 +288,44 @@ def evaluate_all(
         skipped_unpredicted=skipped_unpredicted,
     )
     return summary, evaluations
+
+
+def _expected_calibration_error(
+    buckets: list[CalibrationBucket],
+) -> float:
+    """Weighted-average |mean_pred − actual| across reliability buckets.
+
+    ECE answers "how wrong are my probabilities *on average*?".  A perfect
+    model has ECE = 0.  A model that says 30% but hits 15% on that bucket
+    contributes ``15 × bucket_weight`` to the ECE.  Report in the same
+    units as the bucket probabilities (0–100).
+    """
+    total_count = sum(b.count for b in buckets)
+    if total_count == 0:
+        return 0.0
+    weighted = 0.0
+    for b in buckets:
+        gap = abs(b.mean_predicted - b.actual_win_rate)
+        weighted += gap * b.count
+    return weighted / total_count
+
+
+def _zero_hit_day_rate(
+    evaluations: list[RaceEvaluation],
+) -> float | None:
+    """Fraction of distinct race-dates with no top-1 hit.
+
+    The user's stated variance metric: "hit rate is the ROI headline's
+    prerequisite".  Returns ``None`` when only one day is in the window
+    (statistic is undefined for n=1).
+    """
+    days: dict[date_type, list[bool]] = {}
+    for ev in evaluations:
+        days.setdefault(ev.date, []).append(ev.top1_correct)
+    if len(days) < 2:
+        return None
+    zero_days = sum(1 for hits in days.values() if not any(hits))
+    return zero_days / len(days)
 
 
 def _compute_brier_score(

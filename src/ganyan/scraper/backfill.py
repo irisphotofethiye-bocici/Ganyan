@@ -41,19 +41,34 @@ def get_or_create_track(session: Session, name: str) -> Track:
 def get_or_create_horse(session: Session, name: str, **kwargs) -> Horse:
     """Return an existing Horse or create a new one.
 
+    Identity is TJK's ``AtId`` whenever available (stable across renames
+    and cross-track name collisions).  Legacy rows without ``tjk_at_id``
+    still fall back to name-based lookup to avoid orphaning pre-crawler
+    data; once the detail crawler catches up every row should carry one.
+
     Mutable fields (age, owner, trainer, origin) are updated when provided
     on an existing record so the database always reflects the latest data.
-    ``tjk_at_id`` is captured from the first scrape that exposes it and
-    never overwritten thereafter.
+    ``tjk_at_id`` is seeded once and never overwritten thereafter.
     """
-    horse = session.query(Horse).filter(Horse.name == name).first()
+    at_id = kwargs.get("tjk_at_id")
+    horse: Horse | None = None
+    if at_id is not None:
+        horse = session.query(Horse).filter(Horse.tjk_at_id == at_id).first()
+    if horse is None:
+        # Fallback only for rows we haven't yet linked a tjk_at_id to —
+        # filtered to ``tjk_at_id IS NULL`` so we never glue a new horse
+        # with AtId onto a different horse that just happens to share a
+        # name under a different AtId.
+        q = session.query(Horse).filter(Horse.name == name)
+        if at_id is not None:
+            q = q.filter(Horse.tjk_at_id.is_(None))
+        horse = q.first()
+
     if horse is not None:
         for field in ("age", "origin", "owner", "trainer"):
             value = kwargs.get(field)
             if value is not None:
                 setattr(horse, field, value)
-        # Seed tjk_at_id once, never overwrite (TJK's id is stable).
-        at_id = kwargs.get("tjk_at_id")
         if at_id is not None and horse.tjk_at_id is None:
             horse.tjk_at_id = at_id
         return horse
@@ -92,11 +107,26 @@ def _refresh_entry_fields(existing: RaceEntry, h) -> None:
 
 
 def _fetch_horses_by_names(session: Session, names: list[str]) -> dict[str, Horse]:
-    """Batch-load horses by name in a single query (avoids N+1)."""
+    """Batch-load horses by name in a single query (avoids N+1).
+
+    When multiple rows share a name (possible since the identity switch
+    from name-unique to tjk_at_id-unique), the cache drops the ambiguous
+    name — callers must fall back to ``get_or_create_horse`` which does
+    the disambiguation by ``tjk_at_id``.
+    """
     if not names:
         return {}
     rows = session.query(Horse).filter(Horse.name.in_(names)).all()
-    return {h.name: h for h in rows}
+    cache: dict[str, Horse] = {}
+    ambiguous: set[str] = set()
+    for h in rows:
+        if h.name in cache:
+            ambiguous.add(h.name)
+        else:
+            cache[h.name] = h
+    for name in ambiguous:
+        cache.pop(name, None)
+    return cache
 
 
 def store_race_card(session: Session, parsed: ParsedRaceCard) -> Race:
@@ -345,17 +375,19 @@ def update_race_results(session: Session, parsed: ParsedRaceCard) -> Race | None
 
     # Capture race-level results-page fields the program scrape couldn't
     # possibly have had (Son 800 + exotic payouts only appear on the
-    # results endpoint).
-    if parsed.pace_l800_leader_s is not None:
+    # results endpoint).  Write-once: a later re-scrape during a TJK
+    # pool amendment must not silently overwrite the payout rows that
+    # graded picks are anchored against.
+    if parsed.pace_l800_leader_s is not None and race.pace_l800_leader_s is None:
         race.pace_l800_leader_s = parsed.pace_l800_leader_s
-    if parsed.pace_l800_runner_up_s is not None:
+    if parsed.pace_l800_runner_up_s is not None and race.pace_l800_runner_up_s is None:
         race.pace_l800_runner_up_s = parsed.pace_l800_runner_up_s
     for field in (
         "ganyan_payout_tl", "ikili_payout_tl", "sirali_ikili_payout_tl",
         "uclu_payout_tl", "dortlu_payout_tl",
     ):
         value = getattr(parsed, field, None)
-        if value is not None:
+        if value is not None and getattr(race, field) is None:
             setattr(race, field, value)
 
     horse_cache = _fetch_horses_by_names(

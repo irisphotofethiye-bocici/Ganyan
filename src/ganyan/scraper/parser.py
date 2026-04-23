@@ -161,20 +161,58 @@ def parse_eid_to_seconds(eid: str | None) -> float | None:
 def parse_last_six(last_six: str | None) -> list[int | None]:
     """Parse last-six-races finish positions.
 
-    "2 4 4 5 2 7" -> [2, 4, 4, 5, 2, 7]
-    "1 3 - 2 - 4" -> [1, 3, None, 2, None, 4]
+    Left-to-right is OLDEST → NEWEST (verified against the production DB:
+    the rightmost token always matches the horse's previous ``finish_position``).
+    So the returned list has ``list[-1]`` = most recent race.
+
+    TJK publishes the field as a compact single-char-per-finish string,
+    with ``0`` meaning "position 10 or worse" and ``-`` as a season/gap
+    separator we preserve as ``None``:
+
+        "212464" -> [2, 1, 2, 4, 6, 4]
+        "043335" -> [10, 4, 3, 3, 3, 5]     # leading 0 = 10+
+        "13-2315" -> [1, 3, None, 2, 3, 1, 5]
+        "8225" -> [8, 2, 2, 5]                # horse has <6 recorded races
+
+    Legacy space-separated format (still produced by some test fixtures
+    and older scraper outputs) is tolerated for back-compat:
+
+        "2 4 4 5 2 7" -> [2, 4, 4, 5, 2, 7]
+        "1 3 - 2 - 4" -> [1, 3, None, 2, None, 4]
     """
-    if not last_six or not last_six.strip():
+    if not last_six:
         return []
-    result = []
-    for part in last_six.strip().split():
-        if part == "-":
-            result.append(None)
-        else:
-            try:
-                result.append(int(part))
-            except ValueError:
+    s = last_six.strip()
+    if not s:
+        return []
+
+    # Legacy whitespace-tokenised format used by fixtures + old scrapes.
+    if " " in s:
+        result: list[int | None] = []
+        for part in s.split():
+            if part == "-":
                 result.append(None)
+            else:
+                try:
+                    result.append(int(part))
+                except ValueError:
+                    result.append(None)
+        return result
+
+    # Production format: one character per finish position.  Digits
+    # 1-9 map to their face-value finish; ``0`` means "10 or worse"
+    # (TJK has no two-digit column in this field); ``-`` preserves a
+    # gap so positional alignment with "most recent = last" is
+    # retained.
+    result = []
+    for ch in s:
+        if ch == "-":
+            result.append(None)
+        elif ch.isdigit():
+            n = int(ch)
+            result.append(10 if n == 0 else n)
+        else:
+            result.append(None)
     return result
 
 

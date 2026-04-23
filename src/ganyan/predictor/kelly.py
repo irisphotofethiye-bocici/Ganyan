@@ -80,14 +80,23 @@ def strategy_edge_stats(
     session: Session,
     strategies: Iterable[str] = ("uclu_top1", "uclu_box6", "sirali_ikili_top1"),
     lookback_days: int = 90,
+    before_date: _date | None = None,
 ) -> dict[str, StrategyEdgeStats]:
     """Compute average winning payout + hit rate per strategy.
 
     Only graded, hit picks contribute to ``avg_winning_payout_tl``; the
     ``hit_rate`` divides by the full graded sample so it reflects real
     win fraction.
+
+    ``before_date`` (strict ``<``) is the anti-leak knob for historical
+    sizing: when sizing race R on date D, pass ``before_date=D`` so the
+    calibration is computed strictly from races prior to D.  Without
+    it, a backtest sizing an early-window race would use *its own*
+    graded outcome (and all later races) as "prior" empirical
+    evidence — classic in-sample calibration, biases ROI upward.
     """
-    since = _date.today() - timedelta(days=lookback_days)
+    anchor = before_date if before_date is not None else _date.today()
+    since = anchor - timedelta(days=lookback_days)
     out: dict[str, StrategyEdgeStats] = {}
     for strat in strategies:
         rows = (
@@ -97,6 +106,7 @@ def strategy_edge_stats(
                 Pick.strategy == strat,
                 Pick.graded == True,  # noqa: E712
                 Race.date >= since,
+                Race.date < anchor,
             )
             .all()
         )

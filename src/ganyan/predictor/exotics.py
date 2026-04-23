@@ -19,15 +19,51 @@ We use the Harville (1973) model::
     P(1st = i, 2nd = j) = p_i * p_j / (1 - p_i)
     P(1st = i, 2nd = j, 3rd = k) = p_i * (p_j/(1-p_i)) * (p_k/(1-p_i-p_j))
 
-It is well-documented and computationally cheap.  More elaborate
-alternatives (Henery, Plackett-Luce with position-specific strength)
-exist but rarely beat Harville outside large sample studies.
+**Known bias**: pure Harville systematically overweights favourites in
+place/show probabilities by 5–15% (Lo 1994; Benter 1994).  We correct
+by applying a Henery-style power shrinkage on win probs before the
+Harville expansion for place/top-k markets::
+
+    p'_i = p_i ^ λ / Σ_j p_j ^ λ
+
+``λ < 1`` flattens the favourite and lifts longshots, matching
+empirical place rates more closely.  Default ``λ = 0.85`` (``DEFAULT_PLACE_LAMBDA``)
+is the middle of the published range; callers with a calibration
+dataset can tune it from observed place rates.  Ordered markets
+(sıralı ikili, üçlü, dörtlü) keep pure Harville — the bias is much
+smaller there and the correction has no theoretical basis for ordered
+predictions.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import permutations
+
+
+# Henery-style shrinkage exponent for place/show Harville.  Values in
+# the published literature range ~0.76 (Lo) to ~0.91 (Stern) depending
+# on horse-racing market and methodology.  0.85 is a conservative middle
+# choice; retune against live TJK place rates once a calibration set is
+# assembled.
+DEFAULT_PLACE_LAMBDA = 0.85
+
+
+def _henery_shrink(
+    probs: dict[int, float], lmbda: float,
+) -> dict[int, float]:
+    """Raise each win prob to ``lmbda`` and re-normalise.
+
+    ``lmbda == 1`` is a no-op.  ``lmbda < 1`` pulls mass from the
+    favourites toward the longshots; ``lmbda > 1`` does the opposite.
+    """
+    if lmbda == 1.0 or not probs:
+        return probs
+    raised = {h: max(p, 0.0) ** lmbda for h, p in probs.items()}
+    total = sum(raised.values())
+    if total <= 0:
+        return probs
+    return {h: v / total for h, v in raised.items()}
 
 
 @dataclass(frozen=True)
@@ -60,16 +96,24 @@ def ganyan_probabilities(win_probs: dict[int, float]) -> list[Combo]:
 
 
 def plase_probabilities(
-    win_probs: dict[int, float], top_k: int = 2,
+    win_probs: dict[int, float],
+    top_k: int = 2,
+    *,
+    place_lambda: float = DEFAULT_PLACE_LAMBDA,
 ) -> list[Combo]:
-    """P(horse i finishes in the top ``top_k``) under Harville.
+    """P(horse i finishes in the top ``top_k``) under Henery-corrected Harville.
+
+    Pure Harville over-states favourite place-probabilities; the power
+    transform ``p'_i = p_i^λ / Σ p_j^λ`` with ``λ < 1`` corrects that
+    well-known bias (see module docstring).  Set ``place_lambda=1.0``
+    for the raw Harville behaviour.
 
     Returns a list of single-horse Combos sorted descending by the
     top-k probability (not the win probability).
     """
     if top_k < 1:
         raise ValueError("top_k must be >= 1")
-    probs = _normalize(win_probs)
+    probs = _henery_shrink(_normalize(win_probs), place_lambda)
     horses = list(probs.keys())
 
     results: dict[int, float] = {h: 0.0 for h in horses}
@@ -103,12 +147,16 @@ def sirali_ikili_probabilities(
 
 def ikili_probabilities(
     win_probs: dict[int, float],
+    *,
+    place_lambda: float = DEFAULT_PLACE_LAMBDA,
 ) -> list[Combo]:
     """Unordered top-2 combination probabilities, sorted descending.
 
-    ``P({i,j} = top 2) = P(i=1st, j=2nd) + P(j=1st, i=2nd)``.
+    ``P({i,j} = top 2) = P(i=1st, j=2nd) + P(j=1st, i=2nd)``.  Henery-
+    corrected by default for the same favourite-overweighting reason
+    plase_probabilities documents.
     """
-    probs = _normalize(win_probs)
+    probs = _henery_shrink(_normalize(win_probs), place_lambda)
     horses = list(probs.keys())
     combos: list[Combo] = []
     for a_idx in range(len(horses)):

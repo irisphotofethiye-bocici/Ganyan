@@ -131,19 +131,36 @@ def test_predict_invariant_to_target_race_finish_data(
         pytest.skip(f"Race {resulted_race_id} has no predictions possible.")
     probs_a = {p.horse_id: p.probability for p in preds_a}
 
-    # Null out finish data on target race only.
+    # Null out every post-race field on the target race — entry-level
+    # (finish_position, finish_time, performance_score) AND race-level
+    # (pace_l800_*, exotic payouts).  If predict() is truly invariant
+    # to the target race's own outcome then probabilities must be
+    # bit-for-bit identical before/after.
     entries = (
         db_session.query(RaceEntry)
         .filter(RaceEntry.race_id == resulted_race_id)
         .all()
     )
-    saved_finish = [
-        (e.id, e.finish_position, e.finish_time) for e in entries
+    race = db_session.get(Race, resulted_race_id)
+    saved_entry = [
+        (e.id, e.finish_position, e.finish_time, e.performance_score)
+        for e in entries
     ]
+    saved_race = {
+        f: getattr(race, f)
+        for f in (
+            "pace_l800_leader_s", "pace_l800_runner_up_s",
+            "ganyan_payout_tl", "ikili_payout_tl",
+            "sirali_ikili_payout_tl", "uclu_payout_tl", "dortlu_payout_tl",
+        )
+    }
     try:
         for e in entries:
             e.finish_position = None
             e.finish_time = None
+            e.performance_score = None
+        for f in saved_race:
+            setattr(race, f, None)
         db_session.flush()
         db_session.expire_all()  # force re-read from DB on next predict
 
@@ -172,12 +189,15 @@ def test_predict_invariant_to_target_race_finish_data(
             )
         )
     finally:
-        # Restore finish data so we don't leave the DB in a weird state.
-        for (eid, fp, ft) in saved_finish:
+        # Restore post-race data so we don't leave the DB in a weird state.
+        for (eid, fp, ft, ps) in saved_entry:
             entry = db_session.get(RaceEntry, eid)
             if entry is not None:
                 entry.finish_position = fp
                 entry.finish_time = ft
+                entry.performance_score = ps
+        for f, v in saved_race.items():
+            setattr(race, f, v)
         db_session.flush()
         db_session.rollback()
 

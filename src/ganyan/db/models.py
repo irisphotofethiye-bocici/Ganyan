@@ -99,10 +99,17 @@ class Horse(Base):
     __tablename__ = "horses"
     __table_args__ = (
         Index("ix_horses_tjk_at_id", "tjk_at_id"),
+        Index("ix_horses_name", "name"),
+        # Partial unique index — enforced via migration c9d0e1f2a3b4
+        # (``CREATE UNIQUE INDEX ... WHERE tjk_at_id IS NOT NULL``).
+        # Not expressible in plain SQLAlchemy DDL without a dialect-
+        # specific clause, but listed here for documentation.
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(200), unique=True)
+    # Not globally unique — TJK has multiple horses sharing a registered
+    # name at different tracks/eras.  Stable identity is ``tjk_at_id``.
+    name: Mapped[str] = mapped_column(String(200))
     tjk_at_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     age: Mapped[int | None] = mapped_column(SmallInteger)
     origin: Mapped[str | None] = mapped_column(String(100))
