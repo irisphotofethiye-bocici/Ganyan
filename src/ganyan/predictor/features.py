@@ -41,6 +41,26 @@ class HorseFeatures:
     field_pace_density: float | None = None  # fraction of field that's front-running type
     track_affinity: float | None = None  # retained for compatibility
     s20_edge: float | None = None  # last-20-races score, relative to field average
+    # Historical AGF-top1 hit rate for races of this type × field-size
+    # bucket × surface, measured on resulted races strictly before the
+    # current race date.  Values range ~0.15 (Handikap 16/H3) to ~0.61
+    # (G3).  The point of this feature is to let the tree learn that
+    # AGF carries different weight in different race regimes — in races
+    # with low historical AGF reliability, the model should lean on
+    # other features.
+    agf_reliability: float | None = None
+    # Late-money drift on this specific entry: AGF latest snapshot
+    # minus AGF earliest snapshot.  Positive = late money came in
+    # (insider/trainer signal that public didn't price at card open).
+    # Requires the agf_snapshots table to have ≥2 rows per entry,
+    # which only accumulates if scrape runs multiple times before
+    # post-time.  None on cold-start days.
+    late_agf_drift: float | None = None
+    # Late program changes detected by comparing earliest vs latest
+    # snapshot.  All three are 0/1 floats (None when <2 snapshots).
+    late_jockey_change: float | None = None
+    late_equipment_change: float | None = None
+    late_gate_change: float | None = None
 
 
 def compute_agf_edge(
@@ -456,6 +476,293 @@ def compute_field_pace_density(
     return front_runners / field_size
 
 
+def _field_size_bucket(field_size: int | None) -> str | None:
+    """Bucket field size into the brackets the historical analysis shows
+    matter for AGF reliability (1-6 / 7-10 / 11-14 / 15+)."""
+    if field_size is None or field_size <= 0:
+        return None
+    if field_size <= 6:
+        return "1-6"
+    if field_size <= 10:
+        return "7-10"
+    if field_size <= 14:
+        return "11-14"
+    return "15+"
+
+
+def compute_agf_reliability(
+    session: Session,
+    race_type: str | None,
+    field_size: int | None,
+    surface: str | None,
+    before_date: date_type | None = None,
+    min_sample: int = 30,
+) -> float | None:
+    """Empirical AGF-top1 hit rate for the regime (race_type × field-size
+    bucket × surface), measured on races strictly before ``before_date``.
+
+    This captures the pattern the 2026-04-24 race day + the historical
+    data exposed: AGF is ~61% accurate in G3 races but only ~15% in
+    "Handikap 16/H3" and ~25% in 15+ horse fields.  Giving the tree this
+    feature lets it learn to down-weight AGF in races where AGF is
+    historically unreliable and lean on other features instead.
+
+    Returns ``None`` when the historical sample for the regime is below
+    ``min_sample`` — the regime hit rate would be too noisy to trust.
+    """
+    if field_size is None or field_size <= 0:
+        return None
+    bucket = _field_size_bucket(field_size)
+
+    filters = [Race.status == RaceStatus.resulted]
+    if race_type is not None:
+        filters.append(Race.race_type == race_type)
+    if surface is not None:
+        filters.append(Race.surface == surface)
+    if before_date is not None:
+        filters.append(Race.date < before_date)
+
+    # Bucket by field size in SQL via a subquery with entry counts.
+    subq = (
+        session.query(
+            Race.id.label("race_id"),
+            func.count(RaceEntry.id).label("n_entries"),
+        )
+        .join(RaceEntry, RaceEntry.race_id == Race.id)
+        .filter(*filters)
+        .group_by(Race.id)
+        .subquery()
+    )
+
+    if bucket == "1-6":
+        size_filter = subq.c.n_entries <= 6
+    elif bucket == "7-10":
+        size_filter = and_(subq.c.n_entries >= 7, subq.c.n_entries <= 10)
+    elif bucket == "11-14":
+        size_filter = and_(subq.c.n_entries >= 11, subq.c.n_entries <= 14)
+    else:
+        size_filter = subq.c.n_entries >= 15
+
+    matching_race_ids = (
+        session.query(subq.c.race_id).filter(size_filter).subquery()
+    )
+
+    # Count races in regime, and races where the AGF-top-1 horse won.
+    total = (
+        session.query(func.count())
+        .select_from(matching_race_ids)
+        .scalar()
+    ) or 0
+    if total < min_sample:
+        return None
+
+    # AGF-top1-wins: horse with highest AGF in that race finished 1st.
+    # Done via a window function in raw SQL for speed over 10K+ races.
+    from sqlalchemy import text
+    where_parts = ["r.status = 'resulted'"]
+    params: dict[str, object] = {}
+    if race_type is not None:
+        where_parts.append("r.race_type = :race_type")
+        params["race_type"] = race_type
+    if surface is not None:
+        where_parts.append("r.surface = :surface")
+        params["surface"] = surface
+    if before_date is not None:
+        where_parts.append("r.date < :before_date")
+        params["before_date"] = before_date
+
+    if bucket == "1-6":
+        size_clause = "field_size <= 6"
+    elif bucket == "7-10":
+        size_clause = "field_size BETWEEN 7 AND 10"
+    elif bucket == "11-14":
+        size_clause = "field_size BETWEEN 11 AND 14"
+    else:
+        size_clause = "field_size >= 15"
+
+    sql = text(f"""
+        WITH agf_rank AS (
+            SELECT e.race_id, e.finish_position, e.agf,
+                   RANK() OVER (PARTITION BY e.race_id ORDER BY e.agf DESC NULLS LAST) AS agf_rk,
+                   (SELECT COUNT(*) FROM race_entries ee WHERE ee.race_id=e.race_id) AS field_size
+            FROM race_entries e
+            JOIN races r ON r.id = e.race_id
+            WHERE {' AND '.join(where_parts)}
+              AND e.agf IS NOT NULL
+        )
+        SELECT
+            COUNT(DISTINCT race_id) AS n,
+            SUM(CASE WHEN finish_position=1 AND agf_rk=1 THEN 1 ELSE 0 END) AS agf_hits
+        FROM agf_rank
+        WHERE {size_clause}
+    """)
+    row = session.execute(sql, params).fetchone()
+    if row is None or row[0] is None or row[0] < min_sample:
+        return None
+    n, hits = int(row[0]), int(row[1] or 0)
+    return hits / n
+
+
+def precompute_agf_reliability_table(
+    session: Session,
+    before_date: date_type | None = None,
+    min_sample: int = 30,
+) -> dict[tuple[str | None, str, str | None], float]:
+    """Build a lookup of historical AGF-top1 hit rate per race regime.
+
+    Key: ``(race_type, field_size_bucket, surface)``.  Value: empirical
+    AGF-top1 win rate on resulted races strictly before ``before_date``.
+    Regimes with fewer than ``min_sample`` historical races are
+    suppressed so the tree doesn't learn off a 5-race fluke.
+
+    One aggregate SQL instead of one query per race during the training
+    loop — 50-100× faster on the 6k-race training frame.
+    """
+    from sqlalchemy import text
+
+    where = ["r.status = 'resulted'"]
+    params: dict[str, object] = {}
+    if before_date is not None:
+        where.append("r.date < :before_date")
+        params["before_date"] = before_date
+    params["min_sample"] = min_sample
+
+    sql = text(f"""
+        WITH race_stats AS (
+            SELECT r.id,
+                   r.race_type,
+                   r.surface,
+                   (SELECT COUNT(*) FROM race_entries e
+                    WHERE e.race_id = r.id) AS n_entries,
+                   (SELECT e.finish_position FROM race_entries e
+                    WHERE e.race_id = r.id AND e.agf IS NOT NULL
+                    ORDER BY e.agf DESC NULLS LAST, e.id
+                    LIMIT 1) AS agf_top1_finish
+            FROM races r
+            WHERE {' AND '.join(where)}
+        )
+        SELECT race_type, surface,
+               CASE WHEN n_entries <= 6 THEN '1-6'
+                    WHEN n_entries <= 10 THEN '7-10'
+                    WHEN n_entries <= 14 THEN '11-14'
+                    ELSE '15+' END AS bucket,
+               COUNT(*) AS n,
+               SUM(CASE WHEN agf_top1_finish = 1 THEN 1 ELSE 0 END) AS hits
+        FROM race_stats
+        WHERE agf_top1_finish IS NOT NULL
+        GROUP BY race_type, surface, bucket
+        HAVING COUNT(*) >= :min_sample
+    """)
+    table: dict[tuple[str | None, str, str | None], float] = {}
+    for row in session.execute(sql, params):
+        race_type, surface, bucket, n, hits = row
+        if n == 0:
+            continue
+        table[(race_type, bucket, surface)] = float(hits) / float(n)
+    return table
+
+
+def lookup_agf_reliability(
+    table: dict[tuple[str | None, str, str | None], float],
+    race_type: str | None,
+    field_size: int | None,
+    surface: str | None,
+) -> float | None:
+    """Look up a precomputed reliability value; ``None`` if regime missing."""
+    bucket = _field_size_bucket(field_size)
+    if bucket is None:
+        return None
+    return table.get((race_type, bucket, surface))
+
+
+def compute_late_program_changes(
+    session: Session, race_entry_id: int | None,
+) -> tuple[float | None, float | None, float | None]:
+    """Detect late jockey / equipment / gate changes for an entry.
+
+    Compares the *earliest* snapshot to the *latest* snapshot in
+    ``agf_snapshots``.  Returns three flags (any may be ``None`` when
+    fewer than 2 snapshots have accumulated):
+
+    1. ``late_jockey_change`` — 1 if the jockey name in the latest
+       snapshot differs from the earliest, else 0.  Strong signal: a
+       regular rider getting reported (medical) or punished forces an
+       apprentice substitution within hours of post.
+    2. ``late_equipment_change`` — 1 if the equipment string changed.
+       Indicates a trainer-led tactical shift (first-time blinkers,
+       tongue tie added) the morning program didn't reflect.
+    3. ``late_gate_change`` — 1 if gate_number changed.  Rare but
+       happens when scratchings shift the field; useful for surface-
+       sensitive races.
+
+    Becomes informative once the daemon has accumulated 2+ snapshots
+    per entry; until then all three return ``None``.
+    """
+    from ganyan.db.models import AgfSnapshot
+
+    if race_entry_id is None:
+        return None, None, None
+    rows = (
+        session.query(
+            AgfSnapshot.jockey, AgfSnapshot.equipment,
+            AgfSnapshot.gate_number, AgfSnapshot.taken_at,
+        )
+        .filter(AgfSnapshot.race_entry_id == race_entry_id)
+        .order_by(AgfSnapshot.taken_at.asc())
+        .all()
+    )
+    if len(rows) < 2:
+        return None, None, None
+
+    first_jockey, first_equip, first_gate, _ = rows[0]
+    last_jockey, last_equip, last_gate, _ = rows[-1]
+
+    # Use 0/1 floats for downstream tree splits; str/str comparison
+    # treats whitespace and case strictly so spurious normalisation
+    # doesn't trigger a false positive.
+    def _changed(a, b) -> float | None:
+        if a is None and b is None:
+            return None
+        if a is None or b is None:
+            return 1.0  # appearing/disappearing IS a change
+        return 1.0 if str(a).strip() != str(b).strip() else 0.0
+
+    return (
+        _changed(first_jockey, last_jockey),
+        _changed(first_equip, last_equip),
+        _changed(first_gate, last_gate),
+    )
+
+
+def compute_late_agf_drift(
+    session: Session, race_entry_id: int | None,
+) -> float | None:
+    """AGF drift between the earliest and latest snapshot for an entry.
+
+    Positive = AGF rose since open (late money came in for this horse).
+    Negative = AGF dropped (money flowed away).  Returns ``None`` when
+    there are fewer than 2 snapshots for the entry — typical for entries
+    fetched in a single morning scrape.  Becomes meaningful only after a
+    schedule (or repeated manual scrape) collects multiple readings per
+    race over the course of a day.
+    """
+    from ganyan.db.models import AgfSnapshot
+
+    if race_entry_id is None:
+        return None
+    rows = (
+        session.query(AgfSnapshot.agf, AgfSnapshot.taken_at)
+        .filter(AgfSnapshot.race_entry_id == race_entry_id)
+        .order_by(AgfSnapshot.taken_at.asc())
+        .all()
+    )
+    if len(rows) < 2:
+        return None
+    earliest = float(rows[0][0])
+    latest = float(rows[-1][0])
+    return latest - earliest
+
+
 def _bayesian_smoothed_rate(wins: int, runs: int) -> float:
     """Apply a Beta(prior_mean·weight, (1-prior_mean)·weight) smoothing."""
     alpha = _WINRATE_PRIOR_MEAN * _WINRATE_PRIOR_WEIGHT
@@ -568,6 +875,8 @@ def extract_features(
     sire: str | None = None,
     equipment: str | None = None,
     field_pace_density: float | None = None,
+    agf_reliability: float | None = None,
+    race_entry_id: int | None = None,
 ) -> HorseFeatures:
     features = HorseFeatures(
         speed_figure=compute_speed_figure(eid_seconds, distance_meters),
@@ -580,8 +889,15 @@ def extract_features(
         apprentice_jockey=compute_apprentice_jockey(jockey),
         field_pace_density=field_pace_density,
         s20_edge=compute_s20_edge(s20, field_avg_s20),
+        agf_reliability=agf_reliability,
     )
     if session is not None:
+        features.late_agf_drift = compute_late_agf_drift(session, race_entry_id)
+        (
+            features.late_jockey_change,
+            features.late_equipment_change,
+            features.late_gate_change,
+        ) = compute_late_program_changes(session, race_entry_id)
         features.jockey_win_rate = compute_jockey_win_rate(
             session, jockey, before_date=race_date,
         )

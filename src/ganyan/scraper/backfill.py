@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from sqlalchemy.orm import Session
 
 from ganyan.db.models import (
+    AgfSnapshot,
     Horse,
     Race,
     RaceEntry,
@@ -18,6 +19,36 @@ from ganyan.db.models import (
     Track,
 )
 from ganyan.scraper.parser import ParsedRaceCard
+
+
+def _record_agf_snapshot(
+    session: Session, entry: RaceEntry, h,
+) -> None:
+    """Append a time-series row of the entry's program state.
+
+    Captures AGF + jockey + equipment + gate at this scrape's
+    timestamp.  Cheap insert; skips when AGF is missing because that
+    typically means the program was fetched before TJK published the
+    odds — recording a snapshot without AGF would inflate row counts
+    without adding signal.
+
+    The ``h`` argument is a :class:`RawHorseEntry` (from the scraper's
+    parser), carrying the values *as just observed*.  Diffing earliest
+    vs latest snapshots later lets us detect late jockey changes /
+    equipment changes that the static program field misses.
+    """
+    agf = getattr(h, "agf", None)
+    if agf is None or entry.id is None:
+        return
+    session.add(
+        AgfSnapshot(
+            race_entry_id=entry.id,
+            agf=float(agf),
+            jockey=getattr(h, "jockey", None),
+            equipment=getattr(h, "equipment", None),
+            gate_number=getattr(h, "gate_number", None),
+        )
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +242,7 @@ def store_race_card(session: Session, parsed: ParsedRaceCard) -> Race:
         existing = existing_entries.get((race.id, horse.id))
         if existing is not None:
             _refresh_entry_fields(existing, h)
+            _record_agf_snapshot(session, existing, h)
             continue
 
         entry = RaceEntry(
@@ -231,6 +263,9 @@ def store_race_card(session: Session, parsed: ParsedRaceCard) -> Race:
             finish_time=h.finish_time,
         )
         session.add(entry)
+        # Flush so the new entry has an id before snapshotting AGF.
+        session.flush()
+        _record_agf_snapshot(session, entry, h)
 
     session.flush()
     return race
@@ -327,6 +362,7 @@ def store_historical_race(session: Session, parsed: ParsedRaceCard) -> Race:
         existing = existing_entries.get((race.id, horse.id))
         if existing is not None:
             _refresh_entry_fields(existing, h)
+            _record_agf_snapshot(session, existing, h)
             continue
 
         entry = RaceEntry(
@@ -347,6 +383,8 @@ def store_historical_race(session: Session, parsed: ParsedRaceCard) -> Race:
             finish_time=h.finish_time,
         )
         session.add(entry)
+        session.flush()
+        _record_agf_snapshot(session, entry, h)
 
     session.flush()
     return race

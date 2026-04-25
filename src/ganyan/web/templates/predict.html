@@ -1,24 +1,34 @@
 {% extends "base.html" %}
 
-{% block title %}Ganyan - Tahmin (Kosu {{ race.race_number }}){% endblock %}
+{% block title %}Tahmin — {{ race.track.name if race.track else '?' }} {{ race.race_number }}{% endblock %}
 
 {% block content %}
-<div class="mb-4">
-    <h2>
-        {{ race.track.name if race.track else '?' }} &mdash;
-        {{ race.race_number }}. Kosu
-    </h2>
-    <p class="text-muted">
-        {{ race.date }}{% if race.post_time %} <strong>{{ race.post_time }}</strong>{% endif %} |
-        {{ race.distance_meters or '?' }} m |
-        {{ race.surface or '?' }} |
-        {{ race.entries|length }} at
-    </p>
+<div class="d-flex justify-content-between align-items-start mb-3">
+    <div>
+        <h2 class="mb-1">
+            {{ race.track.name if race.track else '?' }} —
+            {{ race.race_number }}. Koşu
+        </h2>
+        <div class="text-muted small">
+            {{ race.date }}
+            {% if race.post_time %}· <strong class="text-primary">{{ race.post_time }}</strong>{% endif %}
+            · {{ race.distance_meters or '?' }}m
+            {% if race.surface %}· {{ race.surface }}{% endif %}
+            {% if race.race_type %}· {{ race.race_type }}{% endif %}
+            · {{ race.entries|length }} at
+            · <span class="badge bg-{% if race.status.value == 'scheduled' %}primary{% elif race.status.value == 'resulted' %}success{% else %}secondary{% endif %}">
+                {% if race.status.value == 'scheduled' %}bekliyor
+                {% elif race.status.value == 'resulted' %}bitti
+                {% else %}{{ race.status.value }}{% endif %}
+            </span>
+        </div>
+    </div>
+    <a href="/" class="btn btn-outline-secondary btn-sm">← Ana Sayfa</a>
 </div>
 
 {% if recommendations %}
 <div class="mb-4">
-    <h4>Önerilen Bahisler</h4>
+    <h5 class="text-muted">Önerilen Bahisler</h5>
     <div class="row g-3">
         {% for r in recommendations %}
         <div class="col-md-4">
@@ -36,7 +46,7 @@
                     </div>
                     <div class="small mb-1">
                         Bilet: <strong>{{ r.tickets }}</strong>
-                        &nbsp;·&nbsp;
+                        ·
                         Toplam stake: <strong>{{ '%.0f'|format(r.stake_tl) }} TL</strong>
                     </div>
                     <div class="small mb-1">
@@ -64,38 +74,79 @@
 {% endif %}
 
 {% if predictions %}
+<div class="d-flex justify-content-between align-items-end mb-2">
+    <h5 class="text-muted mb-0">Sıralama</h5>
+    <small class="text-muted">
+        {% if ensemble_by_horse %}
+        Ensemble: <strong>{{ (ensemble_by_horse.values()|list)[0].n_heads }}</strong> head
+        {% endif %}
+        {% if drift_by_horse %}
+        · {{ drift_by_horse|length }} at için AGF drift verisi
+        {% endif %}
+    </small>
+</div>
+
 <div class="table-responsive">
-    <table class="table table-hover">
+    <table class="table table-hover align-middle">
         <thead class="table-dark">
             <tr>
                 <th>#</th>
                 <th>At</th>
-                <th>Olasilik</th>
-                <th>Guven</th>
+                <th>Olasılık</th>
+                <th title="Ensemble: rank-1'de hemfikir olan model sayısı">Ensemble</th>
+                <th title="AGF değişimi: gün boyu (latest − earliest)">AGF Drift</th>
+                <th>Güven</th>
                 <th>Etkenler</th>
             </tr>
         </thead>
         <tbody>
             {% for p in predictions %}
-            <tr>
-                <td>{{ loop.index }}</td>
-                <td><strong>{{ p.horse_name }}</strong></td>
-                <td style="min-width: 200px;">
+            {% set ens = ensemble_by_horse.get(p.horse_id) %}
+            {% set drift = drift_by_horse.get(p.horse_id) %}
+            <tr {% if loop.index == 1 %}class="table-primary"{% endif %}>
+                <td><strong>{{ loop.index }}</strong></td>
+                <td>
+                    <strong>{{ p.horse_name }}</strong>
+                </td>
+                <td style="min-width: 180px;">
                     <div class="d-flex align-items-center">
-                        <div class="progress flex-grow-1 me-2" style="height: 20px;">
+                        <div class="progress flex-grow-1 me-2" style="height: 18px;">
                             <div class="progress-bar
                                 {% if p.probability > 25 %}bg-success
                                 {% elif p.probability > 15 %}bg-warning
                                 {% else %}bg-secondary{% endif %}"
-                                 role="progressbar"
-                                 style="width: {{ p.probability }}%"
-                                 aria-valuenow="{{ p.probability }}"
-                                 aria-valuemin="0"
-                                 aria-valuemax="100">
-                            </div>
+                                style="width: {{ p.probability }}%"></div>
                         </div>
-                        <span class="fw-bold">%{{ "%.1f"|format(p.probability) }}</span>
+                        <span class="fw-bold small">%{{ "%.1f"|format(p.probability) }}</span>
                     </div>
+                </td>
+                <td>
+                    {% if ens %}
+                    <span class="conv-pill {% if ens.convergence_top1 >= 5 %}high{% elif ens.convergence_top1 >= 3 %}mid{% else %}low{% endif %}"
+                          title="{{ ens.convergence_top1 }} of {{ ens.n_heads }} heads picked this horse #1; mean prob {{ ens.mean_probability }}%, std {{ ens.disagreement }}">
+                        {{ ens.convergence_top1 }}/{{ ens.n_heads }}
+                    </span>
+                    {% if ens.convergence_top3 != ens.convergence_top1 %}
+                    <small class="text-muted">·top3 {{ ens.convergence_top3 }}</small>
+                    {% endif %}
+                    {% else %}
+                    <span class="text-muted small">–</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if drift %}
+                    <span class="{% if drift.delta > 0.5 %}drift-up{% elif drift.delta < -0.5 %}drift-down{% else %}drift-flat{% endif %}"
+                          title="{{ drift.first }} → {{ drift.last }} ({{ drift.n_samples }} samples)">
+                        {{ '%.0f'|format(drift.first) }} →
+                        {{ '%.0f'|format(drift.last) }}
+                        <span class="ms-1">
+                            {% if drift.delta > 0.5 %}↑{% elif drift.delta < -0.5 %}↓{% else %}—{% endif %}
+                            {{ '%+.1f'|format(drift.delta) }}
+                        </span>
+                    </span>
+                    {% else %}
+                    <span class="text-muted small">–</span>
+                    {% endif %}
                 </td>
                 <td>
                     <span class="badge
@@ -107,6 +158,7 @@
                 </td>
                 <td>
                     {% for factor, impact in p.contributing_factors.items() %}
+                    {% if impact != 0 and impact is number %}
                     <span class="badge rounded-pill
                         {% if impact > 0 %}bg-success
                         {% elif impact < 0 %}bg-danger
@@ -114,6 +166,7 @@
                         me-1" title="{{ factor }}: {{ '%.3f'|format(impact) }}">
                         {{ factor }}
                     </span>
+                    {% endif %}
                     {% endfor %}
                 </td>
             </tr>
@@ -121,11 +174,52 @@
         </tbody>
     </table>
 </div>
+
+{% if ensemble_by_horse %}
+<details class="mt-3">
+    <summary class="text-muted small" style="cursor: pointer;">
+        Per-model olasılık dağılımı (ensemble breakdown) — tıkla
+    </summary>
+    <div class="table-responsive mt-2">
+        <table class="table table-sm small">
+            <thead>
+                <tr>
+                    <th>At</th>
+                    {% set first_ens = (ensemble_by_horse.values()|list)[0] %}
+                    {% for m in first_ens.by_model.keys() %}
+                    <th class="text-end" title="{{ m }}">
+                        {{ m.split('-')[1] if '-' in m else m }}
+                    </th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in predictions %}
+                {% set ens = ensemble_by_horse.get(p.horse_id) %}
+                {% if ens %}
+                <tr>
+                    <td>{{ p.horse_name }}</td>
+                    {% for m, d in ens.by_model.items() %}
+                    <td class="text-end">
+                        <span {% if d.rank == 1 %}class="fw-bold text-success"{% endif %}>
+                            %{{ '%.1f'|format(d.probability) }}
+                        </span>
+                    </td>
+                    {% endfor %}
+                </tr>
+                {% endif %}
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</details>
+{% endif %}
+
 {% else %}
 <div class="alert alert-warning">
-    Bu kosu icin tahmin uretilemiyor. Yeterli veri yok.
+    Bu koşu için tahmin üretilemedi. Yeterli veri yok.
 </div>
 {% endif %}
 
-<a href="/" class="btn btn-outline-secondary mt-3">Ana Sayfaya Don</a>
+<a href="/" class="btn btn-outline-secondary mt-3">← Ana Sayfaya Dön</a>
 {% endblock %}

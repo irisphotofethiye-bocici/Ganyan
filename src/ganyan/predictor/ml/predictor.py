@@ -63,10 +63,18 @@ def load_latest_model(
     booster = lgb.Booster(model_file=str(model_path))
     feature_columns = metadata.get("feature_columns", FEATURE_COLUMNS)
     best_iter = metadata.get("best_iteration")
-    model_version = (
-        f"{ML_MODEL_VERSION_PREFIX}-it{best_iter}"
-        if best_iter is not None else ML_MODEL_VERSION_PREFIX
-    )
+    objective = metadata.get("objective") or "rank"
+    # Distinct version string per objective so ensemble logs can tell
+    # ``lightgbm-rank-it123`` apart from ``lightgbm-finish_time-it250``
+    # at a glance, and the audit Predictions table shows which head
+    # wrote each row.
+    model_version = f"lightgbm-{objective}"
+    if best_iter is not None:
+        model_version = f"{model_version}-it{best_iter}"
+    # Distinguish multiple finish-time/value models on disk by appending
+    # the model's filename stem when it's not the canonical default.
+    if model_name not in {None, DEFAULT_MODEL_BASENAME}:
+        model_version = f"{model_version}-{model_name}"
     temperature = float(metadata.get("softmax_temperature", 1.0) or 1.0)
     return LoadedModel(
         booster=booster,
@@ -130,6 +138,10 @@ class MLPredictor:
 
         # Map back to entries so we can get horse.name.
         entries_by_id = {e.horse_id: e for e in race.entries}
+        agf_by_hid = {
+            e.horse_id: float(e.agf) if e.agf is not None else -1.0
+            for e in race.entries
+        }
         predictions: list[Prediction] = []
         for i, row in frame.iterrows():
             horse_id = int(row["horse_id"])
@@ -151,7 +163,21 @@ class MLPredictor:
                 )
             )
 
-        predictions.sort(key=lambda p: p.probability, reverse=True)
+        # AGF as tiebreaker: LambdaRank emits identical raw scores for
+        # horses the trees can't differentiate (common in sparse
+        # handikap cards) — after softmax those stay tied, and the
+        # single "top pick" becomes arbitrary.  On 2026-04-24 this cost
+        # 4 ticket hits the model had already ranked correctly.  Break
+        # ties by market-implied strength; horse_id provides a final
+        # deterministic fallback when AGF is also missing/equal.
+        predictions.sort(
+            key=lambda p: (
+                p.probability,
+                agf_by_hid.get(p.horse_id, -1.0),
+                -p.horse_id,
+            ),
+            reverse=True,
+        )
         return predictions
 
     def predict_and_save(self, race_id: int) -> list[Prediction]:

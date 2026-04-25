@@ -1,134 +1,224 @@
 {% extends "base.html" %}
 
-{% block title %}Ganyan - Ana Sayfa{% endblock %}
+{% block title %}Ganyan — {{ today }}{% endblock %}
 
 {% block content %}
-<div class="row">
-    <div class="col-md-8">
-        <div class="d-flex justify-content-between align-items-center mb-3">
-            <h2>Bugunun Yarislari</h2>
-            <div class="btn-group">
-                <button class="btn btn-primary"
-                        hx-post="/scrape/today"
-                        hx-target="#main-content"
-                        hx-indicator="#spinner-scrape">
-                    Veri Cek
-                    <span id="spinner-scrape" class="spinner-border spinner-border-sm htmx-indicator ms-1"></span>
-                </button>
-                <button class="btn btn-success"
-                        hx-post="/predict/today"
-                        hx-target="#main-content"
-                        hx-indicator="#spinner-predict">
-                    Tahmin Et
-                    <span id="spinner-predict" class="spinner-border spinner-border-sm htmx-indicator ms-1"></span>
-                </button>
-                <button class="btn btn-warning"
-                        hx-post="/scrape/results"
-                        hx-target="#main-content"
-                        hx-indicator="#spinner-results">
-                    Sonuc Al
-                    <span id="spinner-results" class="spinner-border spinner-border-sm htmx-indicator ms-1"></span>
-                </button>
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h2 class="mb-0">Bugün <small class="text-muted">— {{ today }}</small></h2>
+    <div class="btn-group">
+        <button class="btn btn-primary btn-sm"
+                hx-post="/scrape/today"
+                hx-target="#race-list"
+                hx-indicator="#sp-scrape">
+            Veri Çek
+            <span id="sp-scrape" class="spinner-border spinner-border-sm htmx-indicator ms-1"></span>
+        </button>
+        <button class="btn btn-success btn-sm"
+                hx-post="/predict/today"
+                hx-target="#race-list"
+                hx-indicator="#sp-predict">
+            Tahmin Et
+            <span id="sp-predict" class="spinner-border spinner-border-sm htmx-indicator ms-1"></span>
+        </button>
+        <button class="btn btn-warning btn-sm"
+                hx-post="/scrape/results"
+                hx-target="#race-list"
+                hx-indicator="#sp-results">
+            Sonuçlar
+            <span id="sp-results" class="spinner-border spinner-border-sm htmx-indicator ms-1"></span>
+        </button>
+    </div>
+</div>
+
+<!-- Hero stat row: race count, snapshots, picks, daemon -->
+<div class="row g-2 mb-4">
+    <div class="col-6 col-md-3">
+        <div class="card stat-card">
+            <div class="card-body py-2 px-3">
+                <div class="stat-label">Yarış</div>
+                <div class="stat-value">
+                    {{ status_counts.resulted }}<small class="text-muted">/{{ status_counts.scheduled + status_counts.resulted + status_counts.cancelled }}</small>
+                </div>
+                <div class="small text-muted">
+                    {{ status_counts.scheduled }} bekliyor
+                    {% if status_counts.cancelled %}, {{ status_counts.cancelled }} iptal{% endif %}
+                </div>
             </div>
         </div>
+    </div>
 
-        {% if message is defined and message %}
-        <div class="alert alert-info alert-dismissible fade show">
-            {{ message }}
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    <div class="col-6 col-md-3">
+        <div class="card stat-card">
+            <div class="card-body py-2 px-3">
+                <div class="stat-label">AGF Snapshot</div>
+                <div class="stat-value">{{ snapshot_total }}</div>
+                <div class="small text-muted">
+                    {{ snapshot_entries }} at × {{ avg_snaps }} ortalama
+                </div>
+            </div>
         </div>
-        {% endif %}
+    </div>
 
-        <div id="main-content">
+    <div class="col-6 col-md-3">
+        <div class="card stat-card">
+            <div class="card-body py-2 px-3">
+                <div class="stat-label">Bahis</div>
+                <div class="stat-value">{{ n_picks }}</div>
+                <div class="small text-muted">
+                    {{ n_graded }} gradeli, {{ n_hit }} tutturuldu
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-6 col-md-3">
+        <div class="card stat-card">
+            <div class="card-body py-2 px-3">
+                <div class="stat-label">Sistem</div>
+                {% if snapshot_age is not none %}
+                <div class="stat-value">
+                    {{ snapshot_age }}<small class="text-muted">d</small>
+                </div>
+                <div class="small text-muted">
+                    son AGF · sonuç {{ results_age if results_age is not none else '–' }}d
+                </div>
+                {% else %}
+                <div class="stat-value text-muted">–</div>
+                <div class="small text-muted">daemon kapalı</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if next_race %}
+<div class="alert alert-primary d-flex align-items-center mb-4 py-2">
+    <div class="flex-grow-1">
+        <strong>Sıradaki:</strong>
+        {{ next_race.post_time }} ·
+        {{ next_race.track.name if next_race.track else '?' }}
+        {{ next_race.race_number }}. Koşu ·
+        {{ next_race.distance_meters or '?' }}m
+        {{ next_race.surface or '' }}
+    </div>
+    <a href="/races/{{ next_race.id }}/predict" class="btn btn-sm btn-primary">Tahmine Git →</a>
+</div>
+{% endif %}
+
+{% if message is defined and message %}
+<div class="alert alert-info alert-dismissible fade show">
+    {{ message }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+
+<div class="row g-3">
+    <div class="col-md-8">
+        <h5 class="text-muted">Bugünün Yarışları</h5>
+        <div id="race-list">
             {% if today_races %}
             <div class="list-group">
                 {% for race in today_races %}
                 <a href="/races/{{ race.id }}/predict"
-                   class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
-                    <div>
-                        {% if race.post_time %}
-                        <strong class="text-primary">{{ race.post_time }}</strong>
-                        <span class="mx-1">·</span>
-                        {% endif %}
-                        <strong>{{ race.race_number }}. Kosu</strong>
-                        <span class="text-muted ms-2">
-                            {{ race.track.name if race.track else '?' }}
-                        </span>
-                        <small class="text-muted ms-2">
-                            {{ race.distance_meters or '?' }}m / {{ race.surface or '?' }}
-                        </small>
-                    </div>
-                    <div>
-                        <span class="badge bg-secondary">{{ race.entries|length }} at</span>
-                        {% set has_predictions = race.entries | selectattr('predicted_probability') | list | length > 0 %}
-                        {% if has_predictions %}
-                        <span class="badge bg-success">tahmin var</span>
-                        {% endif %}
-                        <span class="badge bg-{% if race.status.value == 'scheduled' %}primary{% elif race.status.value == 'resulted' %}success{% else %}warning{% endif %}">
-                            {{ race.status.value }}
-                        </span>
+                   class="list-group-item list-group-item-action py-2">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            {% if race.post_time %}
+                            <strong class="text-primary">{{ race.post_time }}</strong>
+                            <span class="text-muted mx-1">·</span>
+                            {% endif %}
+                            <strong>{{ race.race_number }}.</strong>
+                            <span class="ms-1">{{ race.track.name if race.track else '?' }}</span>
+                            <small class="text-muted ms-2">
+                                {{ race.distance_meters or '?' }}m
+                                {% if race.surface %}· {{ race.surface }}{% endif %}
+                                {% if race.race_type %}· {{ race.race_type[:18] }}{% endif %}
+                            </small>
+                        </div>
+                        <div>
+                            <span class="badge bg-light text-dark">{{ race.entries|length }}</span>
+                            {% set has_predictions = race.entries | selectattr('predicted_probability') | list | length > 0 %}
+                            {% if has_predictions %}
+                            <span class="badge bg-info">tahmin</span>
+                            {% endif %}
+                            <span class="badge bg-{% if race.status.value == 'scheduled' %}primary{% elif race.status.value == 'resulted' %}success{% else %}secondary{% endif %}">
+                                {% if race.status.value == 'scheduled' %}bekliyor
+                                {% elif race.status.value == 'resulted' %}bitti
+                                {% else %}{{ race.status.value }}
+                                {% endif %}
+                            </span>
+                        </div>
                     </div>
                 </a>
                 {% endfor %}
             </div>
             {% else %}
             <div class="alert alert-secondary">
-                Bugun icin yarış bulunamadi. "Veri Cek" butonuna tiklayin.
+                Bugün için yarış bulunamadı. <strong>Veri Çek</strong> butonuna tıklayın.
             </div>
             {% endif %}
         </div>
     </div>
 
     <div class="col-md-4">
-        <h4>Islem Akisi</h4>
+        <h5 class="text-muted">Hızlı Bakış</h5>
         <div class="card mb-3">
-            <div class="card-body">
-                <ol class="mb-0 small">
-                    <li class="mb-1"><strong>Veri Cek</strong> — TJK'dan bugunun yarislarini indir</li>
-                    <li class="mb-1"><strong>Tahmin Et</strong> — Tum yarislar icin tahmin uret ve kaydet</li>
-                    <li class="mb-1"><strong>Sonuc Al</strong> — Yarislar bittikten sonra sonuclari cek</li>
-                    <li><a href="/history">Gecmis</a> sayfasindan isabetleri incele</li>
-                </ol>
-            </div>
+            <ul class="list-group list-group-flush small">
+                <li class="list-group-item d-flex justify-content-between">
+                    <a href="/advice">Bahis Tavsiyesi →</a>
+                    <span class="text-muted">{{ n_picks }} picks</span>
+                </li>
+                <li class="list-group-item d-flex justify-content-between">
+                    <a href="/live">Canlı İzle →</a>
+                    <span class="text-muted">{{ status_counts.scheduled }} bekliyor</span>
+                </li>
+                <li class="list-group-item d-flex justify-content-between">
+                    <a href="/picks">Bahis Geçmişi →</a>
+                    <span class="text-muted">ROI takip</span>
+                </li>
+                <li class="list-group-item d-flex justify-content-between">
+                    <a href="/ops">Sistem Sağlığı →</a>
+                    <span class="text-muted">job geçmişi</span>
+                </li>
+            </ul>
         </div>
 
-        <h4>Gecmis Veri Yukle</h4>
+        <h5 class="text-muted">Geçmiş Veri Yükle</h5>
         <div class="card mb-3">
-            <div class="card-body">
-                <form hx-post="/scrape/history" hx-target="#main-content" hx-indicator="#spinner-history">
-                    <div class="mb-2">
-                        <label for="from_date" class="form-label small">Baslangic</label>
-                        <input type="date" class="form-control form-control-sm"
-                               id="from_date" name="from_date" required>
-                    </div>
-                    <div class="mb-2">
-                        <label for="to_date" class="form-label small">Bitis</label>
-                        <input type="date" class="form-control form-control-sm"
-                               id="to_date" name="to_date" required>
+            <div class="card-body py-3">
+                <form hx-post="/scrape/history" hx-target="#race-list" hx-indicator="#sp-history">
+                    <div class="row g-2 mb-2">
+                        <div class="col-6">
+                            <input type="date" class="form-control form-control-sm"
+                                   id="from_date" name="from_date" required
+                                   placeholder="Başlangıç">
+                        </div>
+                        <div class="col-6">
+                            <input type="date" class="form-control form-control-sm"
+                                   id="to_date" name="to_date" required>
+                        </div>
                     </div>
                     <button type="submit" class="btn btn-outline-primary btn-sm w-100">
-                        Gecmis Veri Yukle
-                        <span id="spinner-history" class="spinner-border spinner-border-sm htmx-indicator ms-1"></span>
+                        Geçmiş Yükle
+                        <span id="sp-history" class="spinner-border spinner-border-sm htmx-indicator ms-1"></span>
                     </button>
                 </form>
             </div>
         </div>
 
-        <h4>Son Sonuclar</h4>
         {% if recent_races %}
-        <div class="list-group">
-            {% for race in recent_races %}
+        <h5 class="text-muted">Son Sonuçlar</h5>
+        <div class="list-group small">
+            {% for race in recent_races[:6] %}
             <a href="/races/{{ race.id }}/predict"
-               class="list-group-item list-group-item-action">
+               class="list-group-item list-group-item-action py-2">
                 <div class="d-flex justify-content-between">
-                    <span>{{ race.track.name if race.track else '?' }} #{{ race.race_number }}</span>
+                    <span>{{ race.track.name if race.track else '?' }} · {{ race.race_number }}.</span>
                     <small class="text-muted">{{ race.date }}</small>
                 </div>
             </a>
             {% endfor %}
         </div>
-        {% else %}
-        <p class="text-muted">Henuz sonuc yok.</p>
         {% endif %}
     </div>
 </div>

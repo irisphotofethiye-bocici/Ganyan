@@ -12,11 +12,52 @@ from flask import (
     render_template,
     request,
 )
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from ganyan.db.models import Race, RaceStatus
 
 bp = Blueprint("main", __name__)
+
+
+@bp.app_context_processor
+def _inject_daemon_health():
+    """Make daemon health visible in the navbar on every page.
+
+    Cheap because the underlying query is one indexed lookup against
+    ``job_runs``; runs once per request and Flask handles caching at
+    the response level.  Returns an empty dict on any failure so the
+    UI degrades gracefully if ``job_runs`` doesn't exist yet (e.g.
+    fresh DB).
+    """
+    from ganyan.db.models import JobRun
+
+    try:
+        session = _get_session()
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        last = (
+            session.query(JobRun)
+            .filter(JobRun.job_id == "agf_snapshot",
+                    JobRun.status == "success")
+            .order_by(JobRun.finished_at.desc()).first()
+        )
+        if last is None or last.finished_at is None:
+            return {"daemon_health": {"color": "secondary", "label": "daemon off"}}
+        age_m = int((datetime.now() - last.finished_at).total_seconds() / 60)
+        if age_m <= 35:
+            color = "success"
+        elif age_m <= 90:
+            color = "warning"
+        else:
+            color = "danger"
+        return {
+            "daemon_health": {"color": color, "label": f"snapshot {age_m}m"},
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+    finally:
+        session.close()
 
 
 def _get_session() -> Session:
@@ -40,25 +81,132 @@ def _wants_json() -> bool:
 
 @bp.route("/")
 def index():
+    """Daily dashboard.
+
+    Aggregates the bits an operator looks for *first* on a race day:
+    daemon health (last AGF snapshot age, last results-poll), today's
+    race counts by status, and the next race + tonight's bet roster.
+    Race list goes below — useful but not the headline.
+    """
+    from sqlalchemy import func
+
+    from ganyan.db.models import (
+        AgfSnapshot, JobRun, Pick, RaceEntry,
+    )
+
     session = _get_session()
+    today = date.today()
     try:
         today_races = (
             session.query(Race)
-            .filter(Race.date == date.today())
-            .order_by(Race.race_number)
+            .options(joinedload(Race.track), joinedload(Race.entries))
+            .filter(Race.date == today)
+            .order_by(Race.post_time.nulls_last(), Race.race_number)
             .all()
         )
         recent_races = (
             session.query(Race)
+            .options(joinedload(Race.track))
             .filter(Race.status == RaceStatus.resulted)
             .order_by(Race.date.desc(), Race.race_number.desc())
             .limit(10)
             .all()
         )
+
+        # Daemon health: pull the most recent runs of agf_snapshot,
+        # results_poll, morning_card jobs.  Show last-success age in
+        # minutes; ≤30 min green, ≤90 min amber, older red.
+        last_snapshot_run = (
+            session.query(JobRun)
+            .filter(JobRun.job_id == "agf_snapshot",
+                    JobRun.status == "success")
+            .order_by(JobRun.finished_at.desc()).first()
+        )
+        last_results_run = (
+            session.query(JobRun)
+            .filter(JobRun.job_id == "results_poll",
+                    JobRun.status == "success")
+            .order_by(JobRun.finished_at.desc()).first()
+        )
+
+        def _age_min(run):
+            if run is None or run.finished_at is None:
+                return None
+            return int((datetime.now() - run.finished_at).total_seconds() / 60)
+
+        snapshot_age = _age_min(last_snapshot_run)
+        results_age = _age_min(last_results_run)
+
+        # Daemon-overall status colour: green if snapshot age ≤ 35min
+        # (cron is every 30, so anything under 35 is fresh), amber if
+        # ≤90, red beyond.  Off entirely if no runs ever.
+        if snapshot_age is None:
+            daemon = {"color": "secondary", "label": "daemon: unknown"}
+        elif snapshot_age <= 35:
+            daemon = {"color": "success", "label": f"snapshot {snapshot_age}m"}
+        elif snapshot_age <= 90:
+            daemon = {"color": "warning", "label": f"snapshot {snapshot_age}m"}
+        else:
+            daemon = {"color": "danger", "label": f"snapshot {snapshot_age}m old"}
+
+        # Race-count breakdown today.
+        status_counts = {
+            "scheduled": 0, "resulted": 0, "cancelled": 0,
+        }
+        for r in today_races:
+            status_counts[r.status.value] = status_counts.get(r.status.value, 0) + 1
+
+        # Snapshot count today (all entries × samples).
+        snapshot_total = (
+            session.query(func.count(AgfSnapshot.id))
+            .join(RaceEntry, RaceEntry.id == AgfSnapshot.race_entry_id)
+            .join(Race, Race.id == RaceEntry.race_id)
+            .filter(Race.date == today).scalar()
+        ) or 0
+        snapshot_entries = (
+            session.query(func.count(func.distinct(AgfSnapshot.race_entry_id)))
+            .join(RaceEntry, RaceEntry.id == AgfSnapshot.race_entry_id)
+            .join(Race, Race.id == RaceEntry.race_id)
+            .filter(Race.date == today).scalar()
+        ) or 0
+        avg_snaps = (
+            round(snapshot_total / snapshot_entries, 1)
+            if snapshot_entries else 0.0
+        )
+
+        # Today's pick ledger summary: how many bets active, graded, hit.
+        today_picks_q = (
+            session.query(Pick)
+            .join(Race, Race.id == Pick.race_id)
+            .filter(Race.date == today)
+        )
+        n_picks = today_picks_q.count()
+        n_graded = today_picks_q.filter(Pick.graded.is_(True)).count()
+        n_hit = today_picks_q.filter(Pick.hit.is_(True)).count()
+
+        # Next race upcoming (post_time > now), if any.
+        next_race = next(
+            (r for r in today_races
+             if r.status == RaceStatus.scheduled and r.post_time),
+            None,
+        )
+
         return render_template(
             "index.html",
             today_races=today_races,
             recent_races=recent_races,
+            daemon_health=daemon,
+            today=today,
+            snapshot_age=snapshot_age,
+            results_age=results_age,
+            status_counts=status_counts,
+            snapshot_total=snapshot_total,
+            snapshot_entries=snapshot_entries,
+            avg_snaps=avg_snaps,
+            n_picks=n_picks,
+            n_graded=n_graded,
+            n_hit=n_hit,
+            next_race=next_race,
         )
     finally:
         session.close()
@@ -126,6 +274,7 @@ def predict_race(race_id: int):
             abort(404)
 
         from ganyan.predictor.ml import MLPredictor
+        from ganyan.predictor.ml.ensemble import EnsemblePredictor
         from ganyan.predictor.exotics import (
             ikili_probabilities, sirali_ikili_probabilities,
             uclu_probabilities,
@@ -133,6 +282,49 @@ def predict_race(race_id: int):
 
         predictor = MLPredictor(session)
         predictions = predictor.predict(race_id)
+
+        # Ensemble convergence + per-head breakdown.  Best-effort —
+        # falls back gracefully when no models are loaded yet.
+        ensemble_by_horse: dict[int, dict] = {}
+        try:
+            ens_predictor = EnsemblePredictor(session)
+            ens_preds = ens_predictor.predict(race_id)
+            n_heads = len(ens_predictor.models)
+            for ep in ens_preds:
+                ensemble_by_horse[ep.horse_id] = {
+                    "convergence_top1": ep.convergence_top1,
+                    "convergence_top3": ep.convergence_top3,
+                    "n_heads": n_heads,
+                    "mean_probability": round(ep.mean_probability, 2),
+                    "disagreement": round(ep.disagreement, 2),
+                    "by_model": ep.by_model,
+                }
+        except FileNotFoundError:
+            pass
+
+        # AGF drift per entry — latest snapshot vs earliest, if ≥2.
+        from ganyan.db.models import AgfSnapshot, RaceEntry
+        drift_by_horse: dict[int, dict] = {}
+        entries = (
+            session.query(RaceEntry).filter(RaceEntry.race_id == race_id).all()
+        )
+        for e in entries:
+            snaps = (
+                session.query(AgfSnapshot.agf, AgfSnapshot.taken_at)
+                .filter(AgfSnapshot.race_entry_id == e.id)
+                .order_by(AgfSnapshot.taken_at.asc())
+                .all()
+            )
+            if len(snaps) < 2:
+                continue
+            first = float(snaps[0][0])
+            last = float(snaps[-1][0])
+            drift_by_horse[e.horse_id] = {
+                "first": first,
+                "last": last,
+                "delta": round(last - first, 2),
+                "n_samples": len(snaps),
+            }
 
         recommendations = _build_bet_recommendations(
             race, predictions, ikili_probabilities,
@@ -150,6 +342,8 @@ def predict_race(race_id: int):
                             "probability": round(p.probability, 2),
                             "confidence": round(p.confidence, 2),
                             "contributing_factors": p.contributing_factors,
+                            "ensemble": ensemble_by_horse.get(p.horse_id),
+                            "agf_drift": drift_by_horse.get(p.horse_id),
                         }
                         for p in predictions
                     ],
@@ -162,6 +356,8 @@ def predict_race(race_id: int):
             race=race,
             predictions=predictions,
             recommendations=recommendations,
+            ensemble_by_horse=ensemble_by_horse,
+            drift_by_horse=drift_by_horse,
         )
     finally:
         session.close()

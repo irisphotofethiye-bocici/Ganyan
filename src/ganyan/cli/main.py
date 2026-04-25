@@ -262,7 +262,9 @@ def predict(
     json_output: bool = typer.Option(False, "--json", help="Output JSON format"),
     model: str = typer.Option(
         "ml", "--model",
-        help="Predictor to use: 'ml' (LightGBM ranker, default) or 'bayesian' (hand-tuned fallback).",
+        help="Predictor to use: 'ml' (LightGBM ranker, default), 'bayesian' "
+             "(hand-tuned fallback), or 'ensemble' (every saved model "
+             "voting; convergence-based pick).",
     ),
 ) -> None:
     """Generate race predictions."""
@@ -285,7 +287,48 @@ def _build_predictor(session, model: str):
     if model == "ml":
         from ganyan.predictor.ml import MLPredictor
         return MLPredictor(session)
-    raise typer.BadParameter(f"Unknown model: {model!r}. Use 'bayesian' or 'ml'.")
+    if model == "ensemble":
+        from ganyan.predictor.ml.ensemble import EnsemblePredictor
+
+        class _EnsembleAdapter:
+            """Wrap EnsemblePredictor to match the predict / predict_and_save API."""
+            def __init__(self, sess):
+                self.inner = EnsemblePredictor(sess)
+            def predict(self, race_id):
+                return self.inner.predict_as_predictions(race_id)
+            def predict_and_save(self, race_id):
+                # Persist by reusing MLPredictor's audit-row writer with
+                # the ensemble's "model_version".
+                from ganyan.predictor.ml import MLPredictor
+                from ganyan.db.models import RaceEntry, Prediction as PRow
+                preds = self.predict(race_id)
+                entries = {
+                    (e.race_id, e.horse_id): e
+                    for e in self.inner.session.query(RaceEntry)
+                    .filter(RaceEntry.race_id == race_id).all()
+                }
+                version = (
+                    f"ensemble-{len(self.inner.models)}heads"
+                )
+                for p in preds:
+                    entry = entries.get((race_id, p.horse_id))
+                    if entry is None:
+                        continue
+                    entry.predicted_probability = p.probability
+                    self.inner.session.add(
+                        PRow(
+                            race_entry_id=entry.id,
+                            model_version=version,
+                            probability=p.probability,
+                            confidence=p.confidence,
+                            factors=p.contributing_factors,
+                        )
+                    )
+                return preds
+        return _EnsembleAdapter(session)
+    raise typer.BadParameter(
+        f"Unknown model: {model!r}. Use 'bayesian', 'ml', or 'ensemble'.",
+    )
 
 
 def _predict_race(race_id: int, json_output: bool, model: str) -> None:
@@ -631,6 +674,7 @@ _DEFAULT_TRAIN_WINDOW_DAYS = 90
 
 @train_app.callback(invoke_without_command=True)
 def train(
+    ctx: typer.Context,
     from_date: str = typer.Option(
         None, "--from",
         help=(
@@ -657,13 +701,36 @@ def train(
         False, "--exclude-agf",
         help="Train WITHOUT AGF features (for value-betting comparisons).",
     ),
+    objective: str = typer.Option(
+        "rank", "--objective",
+        help="'rank' (LambdaRank), 'ev' (regression on realised return), "
+             "or 'finish_time' (regression on actual race seconds — "
+             "sort ascending = winner ranker, joins ensemble as 4th vote).",
+    ),
     model_name: str = typer.Option(
         None, "--model-name",
-        help="Filename stem for the saved model (default: lightgbm_ranker, "
-             "or lightgbm_value when --exclude-agf).",
+        help="Filename stem for the saved model.  Default depends on "
+             "objective: lightgbm_ranker / lightgbm_ev / "
+             "lightgbm_finish_time, with `_value` suffix when --exclude-agf.",
     ),
 ) -> None:
-    """Fit a LightGBM LambdaRank model on resulted races and save to disk."""
+    """Fit a LightGBM model on resulted races and save to disk.
+
+    Two objectives:
+
+    - ``--objective rank`` (default) — LambdaRank predicting the winner.
+      Top-1/Top-3 accuracy is the headline metric.
+    - ``--objective ev`` — regression on realised return per 1-TL bet
+      (winner = ganyan_payout-1, losers = -1).  Output is per-horse EV;
+      bet horses where predicted EV > 0.  Headline metric is mean
+      realised EV on the model's top-1 picks across the holdout.
+    """
+    # When a subcommand (linear / cv / specialists) is invoked, the
+    # callback still runs under ``invoke_without_command=True``; skip
+    # the callback body so we don't train a rank model as a side effect.
+    if ctx.invoked_subcommand is not None:
+        return
+
     settings = get_settings()
     logging.basicConfig(level=settings.log_level)
 
@@ -679,9 +746,21 @@ def train(
         start = date.today() - timedelta(days=_DEFAULT_TRAIN_WINDOW_DAYS)
     end = datetime.strptime(to_date, "%Y-%m-%d").date() if to_date else None
 
+    if objective not in {"rank", "ev", "finish_time"}:
+        raise typer.BadParameter(
+            f"objective must be 'rank', 'ev', or 'finish_time' (got {objective!r})",
+        )
     excluded = ["agf_edge", "agf_raw"] if exclude_agf else None
     if model_name is None:
-        model_name = "lightgbm_value" if exclude_agf else "lightgbm_ranker"
+        if objective == "ev":
+            model_name = "lightgbm_ev_value" if exclude_agf else "lightgbm_ev"
+        elif objective == "finish_time":
+            model_name = (
+                "lightgbm_finish_time_value" if exclude_agf
+                else "lightgbm_finish_time"
+            )
+        else:
+            model_name = "lightgbm_value" if exclude_agf else "lightgbm_ranker"
 
     window = f"from {start}" if start else "all history"
     typer.echo(f"Training window: {window} → {end or 'today'}")
@@ -696,6 +775,7 @@ def train(
             num_boost_round=rounds,
             exclude_features=excluded,
             model_name=model_name,
+            objective=objective,
         )
     finally:
         session.close()
@@ -718,6 +798,248 @@ def train(
         if i >= 10:
             break
         typer.echo(f"  {feat:<22} {gain:>10.1f}")
+
+
+# Race-type buckets a specialist will be trained on.  Prefixes so
+# "Handikap 14 /H1" / "Handikap 16 /H2" / etc all fold into one
+# Handikap specialist — feature importance across sub-categories is
+# similar enough that one bucket has acceptable sample size.
+_SPECIALIST_BUCKETS = [
+    ("Handikap", "lightgbm_spec_handikap"),
+    ("Maiden", "lightgbm_spec_maiden"),
+    ("ŞARTLI", "lightgbm_spec_sartli"),
+    ("KV", "lightgbm_spec_kv"),
+    ("SATIŞ", "lightgbm_spec_satis"),
+    ("G", "lightgbm_spec_stakes"),  # G 3 / group races
+]
+
+
+@train_app.command("linear")
+def train_linear(
+    family: str = typer.Option(
+        "conditional_logit", "--family",
+        help="'conditional_logit' (winner MLE, McFadden) or "
+             "'plackett_luce' (top-k ordered finish MLE).",
+    ),
+    all_history: bool = typer.Option(
+        True, "--all-history/--no-all-history",
+        help="Train on every resulted race (default).",
+    ),
+    epochs: int = typer.Option(200, "--epochs", help="Adam epochs."),
+    lr: float = typer.Option(0.05, "--lr", help="Adam learning rate."),
+    top_k: int = typer.Option(3, "--top-k", help="Plackett-Luce top-k."),
+    model_name: str = typer.Option(
+        None, "--model-name", help="Filename stem. Default reflects family.",
+    ),
+) -> None:
+    """Train a pure-numpy linear ranker (Conditional Logit or Plackett-
+    Luce) as an additional ensemble head.  Saves a ``.npz`` + meta.json
+    pair the predictor can reload; runs in seconds, adds methodological
+    diversity (no shared tree bias with LightGBM heads)."""
+    if family not in {"conditional_logit", "plackett_luce"}:
+        raise typer.BadParameter(
+            f"family must be 'conditional_logit' or 'plackett_luce' "
+            f"(got {family!r})",
+        )
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+    from datetime import timedelta
+    from ganyan.db import get_session
+    from ganyan.predictor.ml.linear_ranker import train_conditional_logit
+
+    start = (
+        None if all_history
+        else date.today() - timedelta(days=_DEFAULT_TRAIN_WINDOW_DAYS)
+    )
+    name = model_name or (
+        "linear_conditional_logit" if family == "conditional_logit"
+        else "linear_plackett_luce"
+    )
+
+    session = get_session()
+    try:
+        res = train_conditional_logit(
+            session,
+            from_date=start,
+            epochs=epochs,
+            lr=lr,
+            plackett_luce=(family == "plackett_luce"),
+            top_k=top_k,
+            model_name=name,
+        )
+    finally:
+        session.close()
+
+    typer.echo(f"=== {family} training complete ===")
+    typer.echo(f"Weights:          {res.model_path}")
+    typer.echo(f"Metadata:         {res.metadata_path}")
+    typer.echo(f"Train races:      {res.train_races}")
+    typer.echo(f"Holdout races:    {res.test_races}")
+    typer.echo(f"Metrics:")
+    for k, v in res.metrics.items():
+        if isinstance(v, float):
+            typer.echo(f"  {k:<22} {v:.3f}")
+        else:
+            typer.echo(f"  {k:<22} {v}")
+    typer.echo("")
+    typer.echo("Top coefficients (|β|):")
+    for i, (feat, coef) in enumerate(res.coefficients.items()):
+        if i >= 10:
+            break
+        typer.echo(f"  {feat:<22} {coef:>+8.3f}")
+
+
+@train_app.command("cv")
+def train_cv(
+    folds: int = typer.Option(5, "--folds", help="Number of walk-forward folds."),
+    all_history: bool = typer.Option(
+        True, "--all-history/--no-all-history",
+        help=f"Train on every resulted race (default); off = {_DEFAULT_TRAIN_WINDOW_DAYS}-day window.",
+    ),
+    rounds: int = typer.Option(
+        500, "--rounds", help="Max boosting rounds per fold.",
+    ),
+    race_type_prefix: str = typer.Option(
+        None, "--race-type",
+        help="Restrict CV to one race-type bucket (e.g. 'Handikap').",
+    ),
+) -> None:
+    """Walk-forward K-fold cross-validation to get honest confidence
+    intervals on top-1 accuracy.
+
+    Fits one LambdaRank per fold, evaluates on that fold's held-out
+    chunk.  Reports per-fold top-1/top-3 plus mean ± 95% CI across
+    folds.  Answers "is our 43% top-1 a stable number or a lucky
+    holdout?".
+    """
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+
+    from datetime import timedelta
+    from ganyan.db import get_session
+    from ganyan.predictor.ml.trainer import cross_validate_ranker
+
+    start = (
+        None if all_history
+        else date.today() - timedelta(days=_DEFAULT_TRAIN_WINDOW_DAYS)
+    )
+    session = get_session()
+    try:
+        res = cross_validate_ranker(
+            session,
+            n_folds=folds,
+            from_date=start,
+            num_boost_round=rounds,
+            race_type_prefix=race_type_prefix,
+        )
+    finally:
+        session.close()
+
+    typer.echo(f"=== Walk-forward CV ({res['n_folds']} folds) ===")
+    typer.echo(f"{'fold':>4} {'train_races':>12} {'test_races':>11} {'top1%':>7} {'top3%':>7}")
+    for m in res["per_fold"]:
+        typer.echo(
+            f"{m['fold']:>4} {m['train_races']:>12} {m['test_races']:>11} "
+            f"{m['top1_accuracy']:>7.2f} {m['top3_accuracy']:>7.2f}",
+        )
+    typer.echo("")
+    typer.echo(
+        f"top-1: mean={res['top1_mean']:.2f}%  std={res['top1_std']:.2f}  "
+        f"95% CI ± {res['top1_95_ci_halfwidth']:.2f}pp",
+    )
+    typer.echo(
+        f"top-3: mean={res['top3_mean']:.2f}%  std={res['top3_std']:.2f}",
+    )
+
+
+@train_app.command("specialists")
+def train_specialists(
+    all_history: bool = typer.Option(
+        True, "--all-history/--no-all-history",
+        help="Train on every resulted race (default).  Off falls back to "
+             f"{_DEFAULT_TRAIN_WINDOW_DAYS}-day window.",
+    ),
+    objective: str = typer.Option(
+        "rank", "--objective",
+        help="Passed through to each specialist.  'rank' (default), 'ev', "
+             "or 'finish_time'.",
+    ),
+    rounds: int = typer.Option(
+        500, "--rounds", help="Max boosting rounds per specialist.",
+    ),
+    min_races: int = typer.Option(
+        200, "--min-races",
+        help="Skip buckets with fewer resulted races than this — too noisy.",
+    ),
+) -> None:
+    """Train one LightGBM model per race-type bucket.
+
+    Produces ``lightgbm_spec_<bucket>.txt`` files that the ensemble
+    auto-loads.  Each specialist sees only races whose ``race_type``
+    starts with the bucket's prefix — so Handikap and Maiden models
+    learn different weights, exploiting the 4× AGF-reliability spread
+    across race types.
+    """
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+
+    from datetime import timedelta
+    from ganyan.db import get_session
+    from ganyan.predictor.ml import train_ranker
+
+    start = (
+        None if all_history
+        else date.today() - timedelta(days=_DEFAULT_TRAIN_WINDOW_DAYS)
+    )
+
+    results: list[tuple[str, object, str | None]] = []
+    for prefix, name in _SPECIALIST_BUCKETS:
+        typer.echo(f"--- specialist: {prefix} → {name} ---")
+        session = get_session()
+        try:
+            try:
+                result = train_ranker(
+                    session,
+                    from_date=start,
+                    holdout_fraction=0.2,
+                    num_boost_round=rounds,
+                    model_name=name,
+                    objective=objective,
+                    race_type_prefix=prefix,
+                )
+            except RuntimeError as exc:
+                typer.echo(f"  skipped ({exc})")
+                results.append((prefix, None, str(exc)))
+                continue
+            if result.train_races < min_races:
+                typer.echo(
+                    f"  skipped: only {result.train_races} training races "
+                    f"(< {min_races} threshold)"
+                )
+                results.append(
+                    (prefix, result, f"too few training races: {result.train_races}"),
+                )
+                continue
+            typer.echo(
+                f"  trained on {result.train_races} races, "
+                f"test={result.test_races}, metrics={result.metrics}",
+            )
+            results.append((prefix, result, None))
+        finally:
+            session.close()
+
+    typer.echo("")
+    typer.echo("=== Specialist summary ===")
+    for prefix, result, error in results:
+        if error:
+            typer.echo(f"  {prefix:<10} SKIPPED: {error}")
+        else:
+            top1 = result.metrics.get("top1_accuracy", 0.0)
+            top3 = result.metrics.get("top3_accuracy", 0.0)
+            typer.echo(
+                f"  {prefix:<10} n={result.train_races:>5}+{result.test_races:>4}"
+                f"  top1={top1:>5.1f}%  top3={top3:>5.1f}%",
+            )
 
 
 # ---------------------------------------------------------------------------

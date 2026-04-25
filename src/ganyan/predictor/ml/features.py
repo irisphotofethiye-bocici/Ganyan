@@ -26,7 +26,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from ganyan.db.models import Race, RaceEntry, RaceStatus
-from ganyan.predictor.features import compute_field_pace_density, extract_features
+from ganyan.predictor.features import (
+    compute_field_pace_density, extract_features,
+    lookup_agf_reliability, precompute_agf_reliability_table,
+)
 from ganyan.scraper.parser import parse_eid_to_seconds, parse_last_six
 
 
@@ -55,6 +58,23 @@ FEATURE_COLUMNS: list[str] = [
     "field_pace_density",
     # Last-20-races score — engineered (vs field avg) and raw.
     "s20_edge",
+    # Historical AGF-top1 hit rate for this race's regime (race_type ×
+    # field-size bucket × surface).  Lets the tree learn where AGF is
+    # trustworthy vs where it's noise (e.g. Handikap 16/H3 at 15% vs
+    # G3 at 61% — a 4× spread confirmed on 7k+ historical races).
+    "agf_reliability",
+    # Late-money drift on this entry: difference between latest and
+    # earliest AGF snapshot.  ``None`` for entries with <2 snapshots.
+    # Becomes informative after a few days of multi-fetch scrapes.
+    "late_agf_drift",
+    # Late program changes — 0/1 indicators detected by comparing
+    # earliest vs latest snapshot's jockey / equipment / gate fields.
+    # ``late_jockey_change`` is the strongest sürpriz-at indicator we
+    # can extract from public data — a regular jockey getting reported
+    # (medical) or punished forces a substitution within hours of post.
+    "late_jockey_change",
+    "late_equipment_change",
+    "late_gate_change",
     # Raw values — give the tree room to learn non-linear effects.
     "agf_raw",
     "hp_raw",
@@ -73,6 +93,8 @@ FEATURE_COLUMNS: list[str] = [
 ]
 
 TARGET_COLUMN = "rank_score"
+EV_TARGET_COLUMN = "ev_target"
+FINISH_TIME_TARGET_COLUMN = "finish_seconds"
 GROUP_COLUMN = "race_id"
 
 
@@ -82,6 +104,8 @@ class TrainingFrame:
 
     features: pd.DataFrame  # shape (n_rows, len(FEATURE_COLUMNS))
     target: pd.Series  # rank score per row
+    ev_target: pd.Series  # per-1-TL bet return per row (winners only realised)
+    finish_time_target: pd.Series  # actual finish time in seconds (NaN when missing)
     groups: pd.Series  # race_id per row (used for LGBM grouping)
     race_dates: pd.Series  # race.date per row (used for temporal split)
 
@@ -121,6 +145,7 @@ def build_training_frame(
     to_date: date_type | None = None,
     require_agf: bool = True,
     min_field_size: int = 3,
+    race_type_prefix: str | None = None,
 ) -> TrainingFrame:
     """Extract a feature matrix from resulted races in the DB.
 
@@ -135,6 +160,10 @@ def build_training_frame(
     min_field_size:
         Races with fewer resulted entries than this are dropped (too
         sparse for meaningful ranking).
+    race_type_prefix:
+        Restrict to races whose ``race_type`` starts with this string
+        (e.g. ``"Handikap"`` or ``"Maiden"``).  Used by per-race-type
+        specialist trainers.  ``None`` means no filter.
     """
     q = (
         session.query(Race)
@@ -148,9 +177,24 @@ def build_training_frame(
         q = q.filter(Race.date >= from_date)
     if to_date is not None:
         q = q.filter(Race.date <= to_date)
+    if race_type_prefix is not None:
+        q = q.filter(Race.race_type.like(f"{race_type_prefix}%"))
+
+    # Precompute AGF reliability regime table once — one aggregate SQL
+    # instead of one query per race.  Leak-free snapshot: cutoff is the
+    # earliest training race so no race in the training set contributes
+    # to its own regime's historical hit rate.
+    candidate_races = q.order_by(Race.date.asc(), Race.race_number.asc()).all()
+    if candidate_races:
+        earliest_date = min(r.date for r in candidate_races)
+        agf_reliability_table = precompute_agf_reliability_table(
+            session, before_date=earliest_date,
+        )
+    else:
+        agf_reliability_table = {}
 
     rows: list[dict] = []
-    for race in q.order_by(Race.date.asc(), Race.race_number.asc()).all():
+    for race in candidate_races:
         entries = [
             e for e in race.entries
             if e.finish_position is not None
@@ -175,6 +219,9 @@ def build_training_frame(
         # horse's last_six string — same for every row in this race.
         pace_density = compute_field_pace_density(
             [parse_last_six(e.last_six) for e in entries]
+        )
+        agf_reliability = lookup_agf_reliability(
+            agf_reliability_table, race.race_type, field_size, race.surface,
         )
 
         for entry in entries:
@@ -210,12 +257,43 @@ def build_training_frame(
                 sire=sire_name,
                 equipment=entry.equipment,
                 field_pace_density=pace_density,
+                agf_reliability=agf_reliability,
+                race_entry_id=entry.id,
             )
+            # Finish-time target: this horse's actual recorded time in
+            # seconds.  Same TJK string format as EID — minutes.seconds.
+            # hundredths.  None when the entry has no finish_time row
+            # (DNF / scratched / missing data); regression head drops
+            # those rows at training.
+            finish_seconds = parse_eid_to_seconds(entry.finish_time)
+
+            # EV target: realised return per 1-TL flat bet on this horse.
+            # For the winner of a parimutuel ganyan pool, the payout per 1
+            # TL bet is ``race.ganyan_payout_tl`` (already net of takeout
+            # at TJK).  Net return is therefore ``payout - 1``.  Losers
+            # forfeit the stake → return = -1.  When the actual payout
+            # row is missing, fall back to the AGF-implied payout
+            # ``100 / agf`` so we still get a usable (if noisier) target
+            # for early-window races where TJK didn't publish the pool.
+            if entry.finish_position == 1:
+                if race.ganyan_payout_tl is not None:
+                    ev_value = float(race.ganyan_payout_tl) - 1.0
+                elif entry.agf is not None and float(entry.agf) > 0:
+                    ev_value = (100.0 / float(entry.agf)) - 1.0
+                else:
+                    ev_value = np.nan
+            else:
+                ev_value = -1.0
+
             rows.append({
                 GROUP_COLUMN: race.id,
                 "race_date": race.date,
                 "finish_position": entry.finish_position,
                 "rank_score": field_size - entry.finish_position,
+                EV_TARGET_COLUMN: ev_value,
+                FINISH_TIME_TARGET_COLUMN: (
+                    finish_seconds if finish_seconds is not None else np.nan
+                ),
                 # Engineered
                 "speed_figure": features.speed_figure,
                 "form_cycle": features.form_cycle,
@@ -235,6 +313,11 @@ def build_training_frame(
                 "apprentice_jockey": features.apprentice_jockey,
                 "field_pace_density": features.field_pace_density,
                 "s20_edge": features.s20_edge,
+                "agf_reliability": features.agf_reliability,
+                "late_agf_drift": features.late_agf_drift,
+                "late_jockey_change": features.late_jockey_change,
+                "late_equipment_change": features.late_equipment_change,
+                "late_gate_change": features.late_gate_change,
                 # Raw
                 "agf_raw": float(entry.agf) if entry.agf is not None else np.nan,
                 "hp_raw": float(entry.hp) if entry.hp is not None else np.nan,
@@ -260,6 +343,8 @@ def build_training_frame(
         return TrainingFrame(
             features=pd.DataFrame(columns=FEATURE_COLUMNS),
             target=pd.Series(dtype="int64"),
+            ev_target=pd.Series(dtype="float64"),
+            finish_time_target=pd.Series(dtype="float64"),
             groups=pd.Series(dtype="int64"),
             race_dates=pd.Series(dtype="object"),
         )
@@ -270,6 +355,8 @@ def build_training_frame(
     return TrainingFrame(
         features=df[FEATURE_COLUMNS].astype("float64"),
         target=df[TARGET_COLUMN].astype("int64"),
+        ev_target=df[EV_TARGET_COLUMN].astype("float64"),
+        finish_time_target=df[FINISH_TIME_TARGET_COLUMN].astype("float64"),
         groups=df[GROUP_COLUMN].astype("int64"),
         race_dates=df["race_date"],
     )
@@ -295,6 +382,14 @@ def build_race_frame(session: Session, race_id: int) -> pd.DataFrame:
     field_size = len(entries)
     pace_density = compute_field_pace_density(
         [parse_last_six(e.last_six) for e in entries]
+    )
+    # Inference-time regime lookup: cutoff at the race's own date so
+    # the feature is never computed on post-race information.
+    agf_reliability_table = precompute_agf_reliability_table(
+        session, before_date=race.date,
+    )
+    agf_reliability = lookup_agf_reliability(
+        agf_reliability_table, race.race_type, field_size, race.surface,
     )
 
     rows: list[dict] = []
@@ -324,6 +419,7 @@ def build_race_frame(session: Session, race_id: int) -> pd.DataFrame:
             sire=sire_name,
             equipment=entry.equipment,
             field_pace_density=pace_density,
+            agf_reliability=agf_reliability,
         )
         rows.append({
             "horse_id": entry.horse_id,
@@ -345,6 +441,11 @@ def build_race_frame(session: Session, race_id: int) -> pd.DataFrame:
             "apprentice_jockey": features.apprentice_jockey,
             "field_pace_density": features.field_pace_density,
             "s20_edge": features.s20_edge,
+            "agf_reliability": features.agf_reliability,
+            "late_agf_drift": features.late_agf_drift,
+            "late_jockey_change": features.late_jockey_change,
+            "late_equipment_change": features.late_equipment_change,
+            "late_gate_change": features.late_gate_change,
             "agf_raw": float(entry.agf) if entry.agf is not None else np.nan,
             "hp_raw": float(entry.hp) if entry.hp is not None else np.nan,
             "weight_kg_raw": (

@@ -161,6 +161,45 @@ class RaceEntry(Base):
     horse: Mapped["Horse"] = relationship(back_populates="entries")
 
 
+class AgfSnapshot(Base):
+    """A point-in-time program reading for a race entry.
+
+    Despite the table name, this captures more than AGF: every snapshot
+    also records the jockey, equipment, and gate number at that
+    timestamp.  This lets the model detect *late changes*:
+
+    - **Jockey change** — regular jockey reported/penalized, replaced
+      by an apprentice the last hour.  Often a stronger sürpriz-at
+      indicator than AGF drift.
+    - **Equipment change** — first-time blinkers / tongue tie added
+      pre-post.  Indicates trainer-led tactical shift.
+    - **Gate change** — rare but happens (race-day scratchings shift
+      the field).
+
+    Each ``ganyan scrape --today`` run (and the scheduled agf_snapshot
+    job every 30 min during race hours) appends a row per entry, so
+    over a few days the model can learn off all four time-series.
+    """
+
+    __tablename__ = "agf_snapshots"
+    __table_args__ = (
+        Index("ix_agf_snapshots_race_entry_id", "race_entry_id"),
+        Index("ix_agf_snapshots_taken_at", "taken_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    race_entry_id: Mapped[int] = mapped_column(
+        ForeignKey("race_entries.id", ondelete="CASCADE"),
+    )
+    taken_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False,
+    )
+    agf: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    jockey: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    equipment: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    gate_number: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+
+
 class ScrapeLog(Base):
     __tablename__ = "scrape_log"
     __table_args__ = (

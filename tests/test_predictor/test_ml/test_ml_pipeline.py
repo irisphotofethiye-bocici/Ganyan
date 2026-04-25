@@ -214,4 +214,6 @@ def test_ml_predictor_persists_audit_row(db_session, tmp_path: Path, monkeypatch
     after = db_session.query(PredictionRow).count()
     assert after - before == 6
     versions = {row.model_version for row in db_session.query(PredictionRow).all()}
-    assert any(v.startswith("lightgbm-lambdarank") for v in versions)
+    # Version stamp now includes objective so EV / finish-time / rank
+    # heads are distinguishable in the audit table.
+    assert any(v.startswith("lightgbm-rank") for v in versions)

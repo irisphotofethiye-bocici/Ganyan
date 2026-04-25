@@ -140,21 +140,33 @@ TRACK_NAMES = {
 
 
 def parse_eid_to_seconds(eid: str | None) -> float | None:
-    """Convert TJK EID time string to seconds.
+    """Convert TJK EID / finish-time string to seconds.
 
     Formats:
         "1.30.45" -> 90.45  (minutes.seconds.hundredths)
         "58.20"   -> 58.20  (seconds.hundredths)
+
+    Production data contains a non-trivial fraction of malformed strings
+    — empty components (``"1..45"``), stray whitespace, non-numeric
+    tokens where a horse DNF'd.  Return ``None`` on any parse error
+    instead of raising; callers treat missing finish time as
+    "can't use this row".
     """
     if not eid or not eid.strip():
         return None
     parts = eid.strip().split(".")
-    if len(parts) == 3:
-        minutes, seconds, hundredths = int(parts[0]), int(parts[1]), int(parts[2])
-        return minutes * 60 + seconds + hundredths / 100
-    elif len(parts) == 2:
-        seconds, hundredths = int(parts[0]), int(parts[1])
-        return seconds + hundredths / 100
+    try:
+        if len(parts) == 3:
+            minutes = int(parts[0]) if parts[0] else 0
+            seconds = int(parts[1]) if parts[1] else 0
+            hundredths = int(parts[2]) if parts[2] else 0
+            return minutes * 60 + seconds + hundredths / 100
+        if len(parts) == 2:
+            seconds = int(parts[0]) if parts[0] else 0
+            hundredths = int(parts[1]) if parts[1] else 0
+            return seconds + hundredths / 100
+    except ValueError:
+        return None
     return None
 
 

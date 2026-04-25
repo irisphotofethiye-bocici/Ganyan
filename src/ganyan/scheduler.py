@@ -129,6 +129,53 @@ def _job_morning_card(settings: Settings) -> None:
     )
 
 
+def _job_agf_snapshot(settings: Settings) -> None:
+    """Re-scrape today's program for the sole purpose of capturing the
+    current AGF reading per entry.  Each call writes a row into
+    ``agf_snapshots`` (via the existing scraper code path), so over a
+    day the table accumulates a time-series of how the crowd's belief
+    moves.  Late-money drift = late_snapshot − early_snapshot becomes
+    a feature once enough samples accumulate.
+    """
+    from ganyan.db import get_session
+    from ganyan.db.models import ScrapeStatus
+    from ganyan.scraper import TJKClient, parse_race_card
+    from ganyan.scraper.backfill import log_scrape, store_race_card
+
+    today = date.today()
+    logger.info("scheduler: agf-snapshot starting for %s", today)
+
+    async def _scrape() -> int:
+        session = get_session()
+        n = 0
+        try:
+            async with TJKClient(
+                base_url=settings.tjk_base_url, delay=settings.scrape_delay,
+            ) as client:
+                raw = await client.get_race_card(today)
+                for card in raw:
+                    parsed = parse_race_card(card)
+                    store_race_card(session, parsed)
+                    log_scrape(
+                        session, today, parsed.track_name,
+                        ScrapeStatus.success,
+                    )
+                    n += 1
+                session.commit()
+        finally:
+            session.close()
+        return n
+
+    try:
+        cards = asyncio.run(_scrape())
+    except Exception:  # noqa: BLE001
+        logger.exception("scheduler: agf-snapshot failed")
+        return
+    logger.info(
+        "scheduler: agf-snapshot done (%d cards re-fetched)", cards,
+    )
+
+
 def _job_results_poll(settings: Settings) -> None:
     """Pull today's results — keeps the DB current throughout the day."""
     from ganyan.db import get_session
@@ -273,6 +320,25 @@ def _add_jobs(scheduler, settings: Settings) -> None:
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=600,
+    )
+    scheduler.add_job(
+        _job_agf_snapshot,
+        # Every 30 minutes between 11:00 and 22:30 Turkish time, so we
+        # capture multiple readings per race day from morning AGF
+        # publication through late-money flow at the last post.  Each
+        # call writes a row to agf_snapshots per entry; over time this
+        # builds the time-series the late-drift feature needs.
+        CronTrigger(
+            minute="0,30",
+            hour="11-22",
+            timezone=_TZ,
+        ),
+        args=[settings],
+        id="agf_snapshot",
+        name="AGF snapshot for late-drift signal",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=300,
     )
     scheduler.add_job(
         _job_pedigree_refresh,

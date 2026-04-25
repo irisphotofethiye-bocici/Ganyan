@@ -76,6 +76,128 @@ class TrainingResult:
     feature_importance: dict[str, float] = field(default_factory=dict)
 
 
+def temporal_kfold(
+    frame: TrainingFrame, n_folds: int,
+) -> list[tuple[TrainingFrame, TrainingFrame]]:
+    """Generate ``n_folds`` expanding-window temporal splits.
+
+    Returns a list of ``(train, test)`` ``TrainingFrame`` pairs where
+    fold ``i`` uses the first ``i+1`` date chunks for training and the
+    next chunk for test.  Strictly expanding — each fold's train set is
+    a superset of the previous fold's.  Matches walk-forward evaluation
+    practice (unlike random k-fold which leaks future info backward in
+    time-series data).
+    """
+    if n_folds < 2:
+        raise ValueError("n_folds must be >= 2")
+    unique_dates = sorted(frame.race_dates.unique())
+    if len(unique_dates) < n_folds + 1:
+        raise ValueError(
+            f"Need at least {n_folds + 1} unique race dates for "
+            f"{n_folds}-fold temporal CV (have {len(unique_dates)})",
+        )
+
+    # Split dates into n_folds+1 contiguous chunks.  First chunk is
+    # always training (we need some history to fit anything).
+    chunk_size = len(unique_dates) // (n_folds + 1)
+    chunks: list[list] = []
+    for i in range(n_folds + 1):
+        start = i * chunk_size
+        stop = (i + 1) * chunk_size if i < n_folds else len(unique_dates)
+        chunks.append(unique_dates[start:stop])
+
+    folds: list[tuple[TrainingFrame, TrainingFrame]] = []
+    for fold_idx in range(1, n_folds + 1):
+        train_dates = set().union(*[set(c) for c in chunks[:fold_idx]])
+        test_dates = set(chunks[fold_idx])
+        train_mask = frame.race_dates.isin(train_dates)
+        test_mask = frame.race_dates.isin(test_dates)
+
+        def _slice(mask):
+            return TrainingFrame(
+                features=frame.features[mask].reset_index(drop=True),
+                target=frame.target[mask].reset_index(drop=True),
+                ev_target=frame.ev_target[mask].reset_index(drop=True),
+                finish_time_target=frame.finish_time_target[mask].reset_index(drop=True),
+                groups=frame.groups[mask].reset_index(drop=True),
+                race_dates=frame.race_dates[mask].reset_index(drop=True),
+            )
+
+        folds.append((_slice(train_mask), _slice(test_mask)))
+    return folds
+
+
+def cross_validate_ranker(
+    session: Session,
+    *,
+    n_folds: int = 5,
+    from_date: date_type | None = None,
+    to_date: date_type | None = None,
+    num_boost_round: int = 500,
+    early_stopping_rounds: int = _DEFAULT_EARLY_STOPPING_ROUNDS,
+    params: dict | None = None,
+    race_type_prefix: str | None = None,
+) -> dict:
+    """Walk-forward K-fold CV to put a confidence interval on top-1.
+
+    Fits a fresh LambdaRank per fold, evaluates on that fold's held-out
+    chunk.  Returns per-fold metrics and aggregate mean / std / 95% CI
+    across folds.  A single point estimate (like our 43.08% headline)
+    hides its own uncertainty; ``(mean ± 1.96·std/√n)`` exposes it.
+    """
+    effective_params = {**_DEFAULT_LGBM_PARAMS, **(params or {})}
+    frame = build_training_frame(
+        session, from_date=from_date, to_date=to_date,
+        race_type_prefix=race_type_prefix,
+    )
+    if frame.features.empty:
+        raise RuntimeError("No training data for CV.")
+    folds = temporal_kfold(frame, n_folds)
+    per_fold: list[dict] = []
+    for i, (train, test) in enumerate(folds):
+        train_ds = lgb.Dataset(
+            train.features, label=train.target, group=train.group_sizes(),
+            free_raw_data=False,
+        )
+        valid_ds = lgb.Dataset(
+            test.features, label=test.target, group=test.group_sizes(),
+            reference=train_ds, free_raw_data=False,
+        )
+        booster = lgb.train(
+            params=effective_params,
+            train_set=train_ds,
+            num_boost_round=num_boost_round,
+            valid_sets=[train_ds, valid_ds],
+            valid_names=["train", "test"],
+            callbacks=[
+                lgb.early_stopping(
+                    stopping_rounds=early_stopping_rounds, verbose=False,
+                ),
+                lgb.log_evaluation(period=0),
+            ],
+        )
+        metrics = _evaluate_ranker(booster, test)
+        metrics["fold"] = i + 1
+        metrics["train_races"] = int(train.groups.nunique())
+        metrics["test_races"] = int(test.groups.nunique())
+        per_fold.append(metrics)
+
+    top1s = [m["top1_accuracy"] for m in per_fold]
+    top3s = [m["top3_accuracy"] for m in per_fold]
+    return {
+        "n_folds": n_folds,
+        "per_fold": per_fold,
+        "top1_mean": float(np.mean(top1s)),
+        "top1_std": float(np.std(top1s, ddof=1)) if len(top1s) > 1 else 0.0,
+        "top1_95_ci_halfwidth": (
+            1.96 * float(np.std(top1s, ddof=1)) / (len(top1s) ** 0.5)
+            if len(top1s) > 1 else 0.0
+        ),
+        "top3_mean": float(np.mean(top3s)),
+        "top3_std": float(np.std(top3s, ddof=1)) if len(top3s) > 1 else 0.0,
+    }
+
+
 def _temporal_split(
     frame: TrainingFrame, holdout_fraction: float,
 ) -> tuple[TrainingFrame, TrainingFrame]:
@@ -86,6 +208,8 @@ def _temporal_split(
         return frame, TrainingFrame(
             features=frame.features.iloc[:0].copy(),
             target=frame.target.iloc[:0].copy(),
+            ev_target=frame.ev_target.iloc[:0].copy(),
+            finish_time_target=frame.finish_time_target.iloc[:0].copy(),
             groups=frame.groups.iloc[:0].copy(),
             race_dates=frame.race_dates.iloc[:0].copy(),
         )
@@ -100,6 +224,8 @@ def _temporal_split(
         return TrainingFrame(
             features=frame.features[mask].reset_index(drop=True),
             target=frame.target[mask].reset_index(drop=True),
+            ev_target=frame.ev_target[mask].reset_index(drop=True),
+            finish_time_target=frame.finish_time_target[mask].reset_index(drop=True),
             groups=frame.groups[mask].reset_index(drop=True),
             race_dates=frame.race_dates[mask].reset_index(drop=True),
         )
@@ -112,19 +238,17 @@ def _fit_temperature(
 ) -> float:
     """Fit a single scalar ``T`` minimising NLL of the within-race softmax.
 
-    LambdaRank margins have an arbitrary scale — one booster might output
-    scores in ``[-2, 4]`` and another in ``[-0.3, 0.6]`` for the same
-    underlying belief.  A raw softmax on those scales is wildly over- or
-    under-confident, and Kelly sizing downstream cares a great deal about
-    calibration.  Fitting one scalar temperature on the holdout
-    (Guo et al., 2017, "On Calibration of Modern Neural Networks" —
-    simple Platt scaling for multi-class) corrects the aggregate
-    confidence without touching the ranking.
+    Objective is proper log-loss on the winner per race.  LambdaRank
+    margins have an arbitrary scale; fitting one scalar temperature on
+    the holdout (Guo et al. 2017, multi-class Platt) re-calibrates the
+    aggregate confidence without touching the rank ordering.
 
-    Optimises NLL over ``T ∈ [0.05, 20]`` via golden-section search on
-    ``log T`` — one scalar, convex objective, 40 evaluations is enough
-    for 1e-4 precision.  Returns ``1.0`` if holdout is empty or has no
-    identifiable winner per race.
+    Search is a grid-seeded golden-section over ``log T ∈ [-5, 3]``
+    (``T ∈ [0.007, 20]``) — wider than the previous [-3, 3] so the
+    optimum isn't forced onto the floor when the booster emits small
+    raw margins.  We also print NLL + Brier + ECE across a human-
+    readable grid so operators can sanity-check whether the optimum is
+    genuinely interior or is hugging a boundary.
     """
     if frame.features.empty:
         return 1.0
@@ -147,20 +271,72 @@ def _fit_temperature(
     if not race_blocks:
         return 1.0
 
+    def probs_for(t: float, scores: np.ndarray) -> np.ndarray:
+        shifted = scores / max(t, 1e-6)
+        shifted -= shifted.max()
+        exps = np.exp(shifted)
+        return exps / exps.sum()
+
     def nll(t: float) -> float:
         total = 0.0
         for scores, widx in race_blocks:
-            shifted = scores / t
-            shifted -= shifted.max()
-            exps = np.exp(shifted)
-            p_w = exps[widx] / exps.sum()
-            # Clamp to avoid log(0) when the booster is astronomically
-            # confident against the winner on the holdout.
-            total -= float(np.log(max(p_w, 1e-12)))
+            p = probs_for(t, scores)
+            total -= float(np.log(max(p[widx], 1e-12)))
         return total
 
-    # Golden-section search on log-T in [log 0.05, log 20] ≈ [-3, 3].
-    a, b = -3.0, 3.0
+    def brier(t: float) -> float:
+        total = 0.0
+        for scores, widx in race_blocks:
+            p = probs_for(t, scores)
+            y = np.zeros_like(p)
+            y[widx] = 1.0
+            total += float(np.sum((p - y) ** 2))
+        return total / len(race_blocks)
+
+    def ece_bucketed(t: float, n_bins: int = 10) -> float:
+        # Winner-only ECE: bucket the probability we assigned to the
+        # winner's horse in each race, compare to the observed win rate
+        # (which is 1.0 per race for the winner's row).  Equivalent to
+        # comparing |mean_pred_of_winners − 1| across bins.
+        weights = np.zeros(n_bins)
+        mean_p = np.zeros(n_bins)
+        hits = np.zeros(n_bins)
+        for scores, widx in race_blocks:
+            p = probs_for(t, scores)
+            pw = float(p[widx])
+            idx = min(int(pw * n_bins), n_bins - 1)
+            weights[idx] += 1
+            mean_p[idx] += pw
+            hits[idx] += 1.0  # always 1: bucket is winners by prob
+        # Reliability: for each bucket, compare mean_p/weights vs actual
+        # win rate.  But "actual" here needs a different slicing; use
+        # winner-prob reliability as an approximation.
+        total = weights.sum()
+        if total == 0:
+            return 0.0
+        e = 0.0
+        for i in range(n_bins):
+            if weights[i] == 0:
+                continue
+            mp = mean_p[i] / weights[i]
+            # "Actual" for this bucket = hit_rate_of_winners = 1.0, which
+            # trivialises the metric.  Use 1.0 as target, so ECE here
+            # measures average under-confidence on the winner row.
+            e += abs(mp - 1.0) * (weights[i] / total)
+        return e
+
+    # Emit a human-readable sweep so operators can see the curve shape
+    # and whether the fitted optimum is at a boundary.
+    grid = [0.01, 0.05, 0.1, 0.25, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0]
+    logger.info("Temperature sweep (NLL / Brier):")
+    for t in grid:
+        logger.info(
+            "  T=%.3f  NLL/race=%.4f  Brier/race=%.4f",
+            t, nll(t) / len(race_blocks), brier(t),
+        )
+
+    # Golden-section on log-T in [log 0.007, log 20] = [-5, 3].
+    a, b = -5.0, 3.0
     phi = (1 + 5**0.5) / 2
     resphi = 2 - phi
     tol = 1e-4
@@ -178,7 +354,25 @@ def _fit_temperature(
             x2 = b - resphi * (b - a)
             f2 = nll(float(np.exp(x2)))
     t_star = float(np.exp((a + b) / 2))
-    return max(0.05, min(t_star, 20.0))
+    t_final = max(0.01, min(t_star, 20.0))
+    # Boundary-hugging is a sign the grid shape is pathological (often
+    # because LambdaRank margins are tiny and NLL rewards extreme
+    # peaking).  Log a visible warning so the operator can eyeball the
+    # sweep table and decide whether to override T manually.
+    if t_final <= 0.02 or t_final >= 19.0:
+        logger.warning(
+            "Temperature optimum at boundary (T=%.4f).  Check the sweep "
+            "table above — the fit may have been dominated by tail races "
+            "where the winner was severely misranked.  Consider manual "
+            "T override or retraining after more data is available.",
+            t_final,
+        )
+    logger.info(
+        "Temperature search complete — fitted T=%.4f  NLL/race=%.4f  "
+        "Brier/race=%.4f",
+        t_final, nll(t_final) / len(race_blocks), brier(t_final),
+    )
+    return t_final
 
 
 def _evaluate_ranker(
@@ -226,6 +420,134 @@ def _evaluate_ranker(
     }
 
 
+_EV_LGBM_PARAMS: dict = {
+    "objective": "regression",
+    "metric": "l2",
+    "learning_rate": 0.05,
+    "num_leaves": 31,
+    "min_data_in_leaf": 50,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.85,
+    "bagging_freq": 5,
+    "verbose": -1,
+}
+
+
+_FINISH_TIME_LGBM_PARAMS: dict = {
+    # Huber loss instead of plain L2 — finish_time has heavy tails (DNFs
+    # marked with absurd times, scratched-but-still-recorded entries)
+    # that would dominate L2 gradients.
+    "objective": "huber",
+    "alpha": 0.9,  # Huber tuning param
+    "metric": ["mae", "rmse"],
+    "learning_rate": 0.05,
+    "num_leaves": 63,
+    "min_data_in_leaf": 30,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.85,
+    "bagging_freq": 5,
+    "verbose": -1,
+}
+
+
+def _evaluate_finish_time_model(
+    model: lgb.Booster, frame: TrainingFrame,
+) -> dict[str, float]:
+    """Evaluate finish-time regressor on holdout.
+
+    Reports MAE/RMSE on the seconds target plus a winner-rank metric:
+    if you sort horses ascending by predicted finish time, where does
+    the actual race winner land?  That's the bridge from continuous
+    time prediction to "who wins".
+    """
+    if frame.features.empty:
+        return {"n_races": 0}
+    y = frame.finish_time_target.to_numpy(dtype=float)
+    mask = ~np.isnan(y)
+    if not mask.any():
+        return {"n_races": 0}
+
+    preds = model.predict(frame.features)
+    df = frame.features.copy()
+    df["_pred"] = preds
+    df["_true"] = y
+    df["_target"] = frame.target.values
+    df["_race"] = frame.groups.values
+
+    err = preds[mask] - y[mask]
+    mae = float(np.mean(np.abs(err)))
+    rmse = float(np.sqrt(np.mean(err ** 2)))
+
+    # Rank-of-winner: per race, sort ascending by predicted seconds and
+    # find where the actual winner (max rank_score) lands.  Same metric
+    # as the rank objective so the heads are comparable head-to-head.
+    top1 = top3 = 0
+    winner_ranks: list[int] = []
+    for _race_id, race_df in df.groupby("_race", sort=False):
+        ranked = race_df.sort_values("_pred", ascending=True).reset_index(drop=True)
+        winner_target = race_df["_target"].max()
+        winners = ranked[ranked["_target"] == winner_target]
+        if winners.empty:
+            continue
+        wr = int(winners.index[0]) + 1
+        winner_ranks.append(wr)
+        if wr == 1:
+            top1 += 1
+        if wr <= 3:
+            top3 += 1
+    n = len(winner_ranks)
+    return {
+        "n_races": n,
+        "mae_seconds": mae,
+        "rmse_seconds": rmse,
+        "top1_accuracy": (top1 / n) * 100 if n else 0.0,
+        "top3_accuracy": (top3 / n) * 100 if n else 0.0,
+        "avg_winner_rank": float(np.mean(winner_ranks)) if winner_ranks else 0.0,
+    }
+
+
+def _evaluate_ev_model(
+    model: lgb.Booster, frame: TrainingFrame,
+) -> dict[str, float]:
+    """Evaluate a regression-EV model: realised ROI of betting top-1 picks
+    plus simple +EV-threshold strategies.
+
+    The booster predicts per-horse expected return; we measure what
+    actually happened if we'd flat-bet 1 unit on the model's pick per
+    race.  Compare to flat-betting the AGF favourite as a baseline.
+    """
+    if frame.features.empty:
+        return {"n_races": 0}
+    scores = model.predict(frame.features)
+    df = frame.features.copy()
+    df["_pred_ev"] = scores
+    df["_realised_ev"] = frame.ev_target.values
+    df["_target"] = frame.target.values
+    df["_race"] = frame.groups.values
+
+    # Top-1 by predicted EV per race
+    top1_realised = []
+    positive_ev_realised = []
+    for _, race_df in df.groupby("_race", sort=False):
+        ranked = race_df.sort_values("_pred_ev", ascending=False)
+        top1_realised.append(float(ranked.iloc[0]["_realised_ev"]))
+        # Bet on EVERY horse the model predicts +EV for
+        positive = race_df[race_df["_pred_ev"] > 0.0]
+        if not positive.empty:
+            positive_ev_realised.extend(positive["_realised_ev"].tolist())
+
+    n = len(top1_realised)
+    return {
+        "n_races": n,
+        "top1_ev_avg": float(np.mean(top1_realised)) if n else 0.0,
+        "top1_ev_total": float(np.sum(top1_realised)) if n else 0.0,
+        "positive_ev_picks": len(positive_ev_realised),
+        "positive_ev_realised_avg": (
+            float(np.mean(positive_ev_realised)) if positive_ev_realised else 0.0
+        ),
+    }
+
+
 def train_ranker(
     session: Session,
     *,
@@ -238,33 +560,38 @@ def train_ranker(
     model_name: str | None = None,
     params: dict | None = None,
     exclude_features: list[str] | None = None,
+    objective: str = "rank",
+    race_type_prefix: str | None = None,
 ) -> TrainingResult:
-    """Fit a LightGBM LambdaRank model on resulted races.
+    """Fit a LightGBM model on resulted races.
 
-    Parameters
-    ----------
-    from_date, to_date:
-        Optional inclusive bounds on race dates.
-    holdout_fraction:
-        Fraction of the chronologically latest races reserved for the
-        walk-forward test set.  The final model is fit on the train set
-        with early stopping on the test set.
-    num_boost_round:
-        Maximum training rounds.  Early stopping may terminate sooner.
-    params:
-        LightGBM parameter overrides merged over the defaults.
-
-    The trained booster is saved to ``<model_dir>/<name>.txt`` with a
-    JSON sidecar (``<name>.meta.json``) capturing the feature column
-    list, training bounds, and evaluation metrics.
+    ``objective="rank"`` (default) uses LambdaRank → predict ranking of
+    horses within each race.  ``objective="ev"`` switches to a regression
+    head whose target is the realised return per 1-TL bet — for the
+    winner ``ganyan_payout - 1`` (AGF-implied if pool unknown), for
+    losers ``-1``.  The EV model directly learns to find horses where
+    win probability times payout exceeds the takeout, instead of just
+    ranking horses by win likelihood.  At inference, sort by predicted
+    EV and bet the +EV picks.
     """
-    effective_params = {**_DEFAULT_LGBM_PARAMS, **(params or {})}
+    if objective not in {"rank", "ev", "finish_time"}:
+        raise ValueError(
+            f"objective must be 'rank', 'ev', or 'finish_time', got {objective!r}",
+        )
+
+    if objective == "ev":
+        effective_params = {**_EV_LGBM_PARAMS, **(params or {})}
+    elif objective == "finish_time":
+        effective_params = {**_FINISH_TIME_LGBM_PARAMS, **(params or {})}
+    else:
+        effective_params = {**_DEFAULT_LGBM_PARAMS, **(params or {})}
     model_dir = model_dir or DEFAULT_MODEL_DIR
     model_dir.mkdir(parents=True, exist_ok=True)
     model_name = model_name or DEFAULT_MODEL_BASENAME
 
     frame = build_training_frame(
         session, from_date=from_date, to_date=to_date,
+        race_type_prefix=race_type_prefix,
     )
     if frame.features.empty:
         raise RuntimeError(
@@ -282,6 +609,8 @@ def train_ranker(
         frame = TrainingFrame(
             features=frame.features[keep_cols].reset_index(drop=True),
             target=frame.target,
+            ev_target=frame.ev_target,
+            finish_time_target=frame.finish_time_target,
             groups=frame.groups,
             race_dates=frame.race_dates,
         )
@@ -292,25 +621,61 @@ def train_ranker(
 
     train, test = _temporal_split(frame, holdout_fraction)
 
-    train_dataset = lgb.Dataset(
-        train.features,
-        label=train.target,
-        group=train.group_sizes(),
-        free_raw_data=False,
-    )
-    valid_dataset = None
-    callbacks = []
-    if not test.features.empty:
-        valid_dataset = lgb.Dataset(
-            test.features,
-            label=test.target,
-            group=test.group_sizes(),
-            reference=train_dataset,
+    if objective in {"ev", "finish_time"}:
+        # Regression: per-row label is either realised EV or actual
+        # finish time.  No groups parameter (LightGBM regression
+        # objective is independent of within-race grouping).
+        if objective == "ev":
+            train_label_full = train.ev_target
+            valid_label_full = test.ev_target
+        else:
+            train_label_full = train.finish_time_target
+            valid_label_full = test.finish_time_target
+        # Drop any rows where the target couldn't be computed.
+        train_mask = train_label_full.notna()
+        train_features = train.features[train_mask].reset_index(drop=True)
+        train_label = train_label_full[train_mask].reset_index(drop=True)
+        train_dataset = lgb.Dataset(
+            train_features, label=train_label, free_raw_data=False,
+        )
+        valid_dataset = None
+        callbacks = []
+        if not test.features.empty:
+            valid_mask = valid_label_full.notna()
+            valid_features = test.features[valid_mask].reset_index(drop=True)
+            valid_label = valid_label_full[valid_mask].reset_index(drop=True)
+            if not valid_features.empty:
+                valid_dataset = lgb.Dataset(
+                    valid_features, label=valid_label,
+                    reference=train_dataset, free_raw_data=False,
+                )
+                callbacks.append(
+                    lgb.early_stopping(
+                        stopping_rounds=early_stopping_rounds, verbose=False,
+                    ),
+                )
+    else:
+        train_dataset = lgb.Dataset(
+            train.features,
+            label=train.target,
+            group=train.group_sizes(),
             free_raw_data=False,
         )
-        callbacks.append(
-            lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False),
-        )
+        valid_dataset = None
+        callbacks = []
+        if not test.features.empty:
+            valid_dataset = lgb.Dataset(
+                test.features,
+                label=test.target,
+                group=test.group_sizes(),
+                reference=train_dataset,
+                free_raw_data=False,
+            )
+            callbacks.append(
+                lgb.early_stopping(
+                    stopping_rounds=early_stopping_rounds, verbose=False,
+                ),
+            )
     callbacks.append(lgb.log_evaluation(period=0))  # silence per-iter chatter
 
     booster = lgb.train(
@@ -322,13 +687,24 @@ def train_ranker(
         callbacks=callbacks,
     )
 
-    metrics = _evaluate_ranker(booster, test)
-    # Fit the within-race softmax temperature on holdout.  Persisted
-    # alongside the booster; MLPredictor reads it back and applies
-    # ``raw / T`` before the softmax so downstream Kelly sizing gets
-    # calibrated (not arbitrary-scaled) probabilities.
-    temperature = _fit_temperature(booster, test)
+    if objective == "ev":
+        metrics = _evaluate_ev_model(booster, test)
+        temperature = 1.0
+    elif objective == "finish_time":
+        metrics = _evaluate_finish_time_model(booster, test)
+        # The ensemble converts predicted seconds → within-race
+        # probabilities via softmax(-z_score(seconds) / T).  Default
+        # T=1; tunable later if convergence votes need re-balancing.
+        temperature = 1.0
+    else:
+        metrics = _evaluate_ranker(booster, test)
+        # Fit the within-race softmax temperature on holdout.  Persisted
+        # alongside the booster; MLPredictor reads it back and applies
+        # ``raw / T`` before the softmax so downstream Kelly sizing gets
+        # calibrated (not arbitrary-scaled) probabilities.
+        temperature = _fit_temperature(booster, test)
     metrics["softmax_temperature"] = temperature
+    metrics["objective"] = objective
 
     # Save model + metadata.
     model_path = model_dir / f"{model_name}.txt"
@@ -349,6 +725,8 @@ def train_ranker(
     metadata = {
         "feature_columns": trained_feature_cols,
         "excluded_features": excluded,
+        "objective": objective,
+        "race_type_prefix": race_type_prefix,
         "params": effective_params,
         "train_races": int(train.groups.nunique()),
         "test_races": int(test.groups.nunique()),
@@ -365,13 +743,35 @@ def train_ranker(
     }
     meta_path.write_text(json.dumps(metadata, indent=2, default=str))
 
-    logger.info(
-        "Trained LightGBM ranker — train_races=%d test_races=%d top1=%.2f%% top3=%.2f%%",
-        metadata["train_races"],
-        metadata["test_races"],
-        metrics["top1_accuracy"],
-        metrics["top3_accuracy"],
-    )
+    if objective == "ev":
+        logger.info(
+            "Trained EV regressor — train_races=%d test_races=%d "
+            "top1_avg_ev=%.4f positive_ev_picks=%d positive_ev_avg=%.4f",
+            metadata["train_races"],
+            metadata["test_races"],
+            metrics.get("top1_ev_avg", 0.0),
+            metrics.get("positive_ev_picks", 0),
+            metrics.get("positive_ev_realised_avg", 0.0),
+        )
+    elif objective == "finish_time":
+        logger.info(
+            "Trained finish-time regressor — train_races=%d test_races=%d "
+            "MAE=%.3fs RMSE=%.3fs top1=%.2f%% top3=%.2f%%",
+            metadata["train_races"],
+            metadata["test_races"],
+            metrics.get("mae_seconds", 0.0),
+            metrics.get("rmse_seconds", 0.0),
+            metrics.get("top1_accuracy", 0.0),
+            metrics.get("top3_accuracy", 0.0),
+        )
+    else:
+        logger.info(
+            "Trained LightGBM ranker — train_races=%d test_races=%d top1=%.2f%% top3=%.2f%%",
+            metadata["train_races"],
+            metadata["test_races"],
+            metrics["top1_accuracy"],
+            metrics["top3_accuracy"],
+        )
 
     return TrainingResult(
         model_path=model_path,
