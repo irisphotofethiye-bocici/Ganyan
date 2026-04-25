@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from .base import ExternalSignalRow, ExternalSource, register_source, REGISTRY
 from .tjk_discipline import TjkDisciplineSource
+from .tjk_workouts import TjkWorkoutSource
 from .yarisrehberi import YarisRehberiTipsterSource
 
 
@@ -22,6 +23,7 @@ from .yarisrehberi import YarisRehberiTipsterSource
 # call register_source() at module import time the same way.
 register_source(YarisRehberiTipsterSource)
 register_source(TjkDisciplineSource)
+register_source(TjkWorkoutSource)
 
 __all__ = [
     "ExternalSignalRow",

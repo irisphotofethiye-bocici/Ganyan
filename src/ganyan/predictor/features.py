@@ -71,6 +71,11 @@ class HorseFeatures:
     # from late_jockey_change (which detects the substitution after
     # the snapshot diff catches it; this one detects BEFORE).
     jockey_discipline_flag: float | None = None
+    # Workout-derived fitness signals from TJK İdman İstatistikleri.
+    # ``None`` when no workouts captured for this horse yet.
+    days_since_workout: float | None = None  # days between latest workout and today
+    workout_speed_ms: float | None = None  # m/s on latest split closest to race distance
+    n_workouts_recent: float | None = None  # distinct workout dates in lookback window
 
 
 def compute_agf_edge(
@@ -685,6 +690,95 @@ def lookup_agf_reliability(
     return table.get((race_type, bucket, surface))
 
 
+def compute_workout_signals(
+    session: Session, race_entry_id: int | None,
+    race_distance_m: int | None = None,
+) -> tuple[float | None, float | None, float | None]:
+    """Three workout-derived features for the entry's horse:
+
+    1. ``days_since_workout`` — days between the most recent workout
+       and today.  Lower = recently trained.  ``None`` until a
+       workout is captured.
+    2. ``workout_speed_ms`` — meters-per-second on the most recent
+       timed split.  Higher = sharper recent work.  Picks the split
+       closest to ``race_distance_m`` when provided, else the longest
+       available split.
+    3. ``n_workouts_recent`` — count of distinct workout dates
+       captured in the lookback window.  More workouts = more recent
+       activity.  Capped at signal cardinality.
+
+    Bound from ``external_signals`` rows where ``signal_type ==
+    'workout_split'`` and the row resolves to this entry.
+    """
+    from ganyan.db.models import ExternalSignal
+
+    if race_entry_id is None:
+        return None, None, None
+    rows = (
+        session.query(ExternalSignal.value, ExternalSignal.payload)
+        .filter(
+            ExternalSignal.race_entry_id == race_entry_id,
+            ExternalSignal.signal_type == "workout_split",
+        )
+        .all()
+    )
+    if not rows:
+        return None, None, None
+
+    today = datetime.now().date() if False else None  # placeholder, unused
+    most_recent_date: date_type | None = None
+    workout_dates: set = set()
+    best_split: tuple[int, float] | None = None  # (distance, seconds)
+    target_distance = race_distance_m or 1000
+
+    for value, payload in rows:
+        if payload is None or value is None:
+            continue
+        d = payload.get("workout_date")
+        try:
+            wd = date_type.fromisoformat(d) if d else None
+        except ValueError:
+            wd = None
+        if wd is None:
+            continue
+        workout_dates.add(wd)
+        if most_recent_date is None or wd > most_recent_date:
+            most_recent_date = wd
+        # Track the split closest to target distance from the most
+        # recent workout — pick by smallest distance gap, breaking
+        # ties on a more recent date.
+        dist = int(payload.get("distance_m") or 0)
+        if dist <= 0:
+            continue
+        gap = abs(dist - target_distance)
+        if best_split is None:
+            best_split = (dist, float(value))
+            best_gap = gap
+            best_date = wd
+        else:
+            # Prefer smaller distance gap; on tie prefer fresher date.
+            curr_dist, curr_sec = best_split
+            curr_gap = abs(curr_dist - target_distance)
+            if gap < curr_gap or (gap == curr_gap and wd > best_date):
+                best_split = (dist, float(value))
+                best_gap = gap
+                best_date = wd
+
+    days_since = None
+    if most_recent_date is not None:
+        from datetime import date as _date
+        days_since = float((_date.today() - most_recent_date).days)
+
+    workout_speed_ms = None
+    if best_split is not None and best_split[1] > 0:
+        dist, sec = best_split
+        workout_speed_ms = dist / sec
+
+    n_workouts = float(len(workout_dates)) if workout_dates else None
+
+    return days_since, workout_speed_ms, n_workouts
+
+
 def compute_jockey_discipline_flag(
     session: Session, race_entry_id: int | None,
 ) -> float | None:
@@ -997,6 +1091,13 @@ def extract_features(
         )
         features.jockey_discipline_flag = compute_jockey_discipline_flag(
             session, race_entry_id,
+        )
+        (
+            features.days_since_workout,
+            features.workout_speed_ms,
+            features.n_workouts_recent,
+        ) = compute_workout_signals(
+            session, race_entry_id, distance_meters,
         )
         features.jockey_win_rate = compute_jockey_win_rate(
             session, jockey, before_date=race_date,

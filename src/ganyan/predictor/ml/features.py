@@ -84,6 +84,12 @@ FEATURE_COLUMNS: list[str] = [
     # 0 when scraped clean, NaN pre-scrape.  Predicts substitute-
     # rider scenarios before the morning program shows the change.
     "jockey_discipline_flag",
+    # Workout-derived fitness signals from TJK İdman İstatistikleri.
+    # NaN until first workout scrape captures rows for this horse.
+    # Triple-feature: recency, raw speed, and frequency of training.
+    "days_since_workout",
+    "workout_speed_ms",
+    "n_workouts_recent",
     # Raw values — give the tree room to learn non-linear effects.
     "agf_raw",
     "hp_raw",
@@ -329,6 +335,9 @@ def build_training_frame(
                 "late_gate_change": features.late_gate_change,
                 "tipster_consensus": features.tipster_consensus,
                 "jockey_discipline_flag": features.jockey_discipline_flag,
+                "days_since_workout": features.days_since_workout,
+                "workout_speed_ms": features.workout_speed_ms,
+                "n_workouts_recent": features.n_workouts_recent,
                 # Raw
                 "agf_raw": float(entry.agf) if entry.agf is not None else np.nan,
                 "hp_raw": float(entry.hp) if entry.hp is not None else np.nan,
@@ -459,6 +468,9 @@ def build_race_frame(session: Session, race_id: int) -> pd.DataFrame:
             "late_gate_change": features.late_gate_change,
             "tipster_consensus": features.tipster_consensus,
             "jockey_discipline_flag": features.jockey_discipline_flag,
+            "days_since_workout": features.days_since_workout,
+            "workout_speed_ms": features.workout_speed_ms,
+            "n_workouts_recent": features.n_workouts_recent,
             "agf_raw": float(entry.agf) if entry.agf is not None else np.nan,
             "hp_raw": float(entry.hp) if entry.hp is not None else np.nan,
             "weight_kg_raw": (

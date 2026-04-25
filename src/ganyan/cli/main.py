@@ -294,7 +294,9 @@ def scrape_external(
         target = datetime.strptime(target_date, "%Y-%m-%d").date()
 
     from ganyan.scraper.external.resolver import (
-        bind_discipline_to_entries, resolve_unbound_signals,
+        bind_discipline_to_entries,
+        bind_workouts_to_entries,
+        resolve_unbound_signals,
     )
 
     session = get_session()
@@ -308,6 +310,8 @@ def scrape_external(
         bound = resolve_unbound_signals(session, target, source_name=source)
         if source == "tjk_discipline":
             bound += bind_discipline_to_entries(session, target)
+        if source == "tjk_workouts":
+            bound += bind_workouts_to_entries(session, target)
         session.commit()
     finally:
         session.close()

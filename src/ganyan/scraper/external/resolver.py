@@ -361,6 +361,95 @@ def bind_discipline_to_entries(
     return n_bound + n_dup
 
 
+def bind_workouts_to_entries(
+    session: Session, target_date: date_type,
+    workout_lookback_days: int = 21,
+) -> int:
+    """Bind tjk_workouts signals to today's entries by horse name.
+
+    Each workout signal gets resolved against ``Horse.name`` for
+    horses entered in races on ``target_date``.  Workouts older than
+    ``workout_lookback_days`` are skipped — only recent training
+    bears on current fitness; ancient workouts would inflate the
+    aggregator without adding signal.
+
+    A horse with multiple recent workouts gets ALL of them bound to
+    its entry today; the feature aggregator picks whichever distance
+    matches or computes a recency-weighted average.
+    """
+    from ganyan.db.models import Horse
+
+    cutoff = target_date - timedelta(days=workout_lookback_days)
+
+    candidates = (
+        session.query(ExternalSignal)
+        .filter(
+            ExternalSignal.source_name == "tjk_workouts",
+            ExternalSignal.race_entry_id.is_(None),
+        )
+        .all()
+    )
+    if not candidates:
+        return 0
+
+    # Pre-load today's entries indexed by horse name.  Multiple entries
+    # per horse name are uncommon (cross-track collisions); we bind
+    # each workout to all matching entries.
+    rows = (
+        session.query(RaceEntry, Race, Horse)
+        .join(Race, Race.id == RaceEntry.race_id)
+        .join(Horse, Horse.id == RaceEntry.horse_id)
+        .filter(Race.date == target_date)
+        .all()
+    )
+    by_name: dict[str, list[tuple[RaceEntry, Race]]] = {}
+    for entry, race, horse in rows:
+        if horse.name:
+            by_name.setdefault(horse.name.strip().upper(), []).append((entry, race))
+    if not by_name:
+        return 0
+
+    n_bound = 0
+    n_dup = 0
+    for sig in candidates:
+        payload = sig.payload or {}
+        wd = payload.get("workout_date")
+        try:
+            wdate = date_type.fromisoformat(wd) if wd else None
+        except ValueError:
+            wdate = None
+        if wdate is None or wdate < cutoff or wdate > target_date:
+            continue
+
+        horse_name = (payload.get("horse_name") or "").strip().upper()
+        matches = by_name.get(horse_name, [])
+        if not matches:
+            continue
+
+        first_entry, first_race = matches[0]
+        sig.race_entry_id = first_entry.id
+        sig.race_id = first_race.id
+        n_bound += 1
+        for entry, race in matches[1:]:
+            session.add(ExternalSignal(
+                source_name=sig.source_name,
+                signal_type=sig.signal_type,
+                race_id=race.id,
+                race_entry_id=entry.id,
+                value=sig.value,
+                payload=sig.payload,
+                captured_at=sig.captured_at,
+            ))
+            n_dup += 1
+
+    session.flush()
+    logger.info(
+        "workout binder: %d primary, %d duplicated rows for %s",
+        n_bound, n_dup, target_date,
+    )
+    return n_bound + n_dup
+
+
 def fetch_and_resolve(
     session: Session, target_date: date_type, sources: Iterable[str] | None = None,
 ) -> dict[str, int]:
@@ -393,4 +482,6 @@ def fetch_and_resolve(
     resolve_unbound_signals(session, target_date)
     # Discipline name-match resolver (TJK reported/penalized jockeys).
     bind_discipline_to_entries(session, target_date)
+    # Workout name-match resolver (TJK İdman İstatistikleri).
+    bind_workouts_to_entries(session, target_date)
     return results
