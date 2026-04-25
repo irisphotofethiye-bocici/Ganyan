@@ -90,6 +90,17 @@ FEATURE_COLUMNS: list[str] = [
     "days_since_workout",
     "workout_speed_ms",
     "n_workouts_recent",
+    # Track-condition features (race-level — every entry in a race
+    # shares the same readings).  Captured by the PistBilgileri scrape.
+    "temperature_c",
+    "humidity_pct",
+    "pressure_mb",
+    "sky_bucket",
+    "wind_kph",
+    # Steward-report existence flag — coarse "incident-rich race day"
+    # indicator.  Full text mining deferred until existence flag
+    # itself shows predictive value.
+    "steward_report_flag",
     # Raw values — give the tree room to learn non-linear effects.
     "agf_raw",
     "hp_raw",
@@ -274,6 +285,7 @@ def build_training_frame(
                 field_pace_density=pace_density,
                 agf_reliability=agf_reliability,
                 race_entry_id=entry.id,
+                race_id_for_signals=race.id,
             )
             # Finish-time target: this horse's actual recorded time in
             # seconds.  Same TJK string format as EID — minutes.seconds.
@@ -338,6 +350,12 @@ def build_training_frame(
                 "days_since_workout": features.days_since_workout,
                 "workout_speed_ms": features.workout_speed_ms,
                 "n_workouts_recent": features.n_workouts_recent,
+                "temperature_c": features.temperature_c,
+                "humidity_pct": features.humidity_pct,
+                "pressure_mb": features.pressure_mb,
+                "sky_bucket": features.sky_bucket,
+                "wind_kph": features.wind_kph,
+                "steward_report_flag": features.steward_report_flag,
                 # Raw
                 "agf_raw": float(entry.agf) if entry.agf is not None else np.nan,
                 "hp_raw": float(entry.hp) if entry.hp is not None else np.nan,
@@ -471,6 +489,12 @@ def build_race_frame(session: Session, race_id: int) -> pd.DataFrame:
             "days_since_workout": features.days_since_workout,
             "workout_speed_ms": features.workout_speed_ms,
             "n_workouts_recent": features.n_workouts_recent,
+            "temperature_c": features.temperature_c,
+            "humidity_pct": features.humidity_pct,
+            "pressure_mb": features.pressure_mb,
+            "sky_bucket": features.sky_bucket,
+            "wind_kph": features.wind_kph,
+            "steward_report_flag": features.steward_report_flag,
             "agf_raw": float(entry.agf) if entry.agf is not None else np.nan,
             "hp_raw": float(entry.hp) if entry.hp is not None else np.nan,
             "weight_kg_raw": (

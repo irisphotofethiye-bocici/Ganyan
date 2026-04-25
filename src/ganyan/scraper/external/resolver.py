@@ -450,6 +450,89 @@ def bind_workouts_to_entries(
     return n_bound + n_dup
 
 
+def bind_track_conditions_to_races(
+    session: Session, target_date: date_type,
+) -> int:
+    """Bind track-condition + steward-report signals to races by
+    (track, reading_date) — *not* restricted to ``target_date``.
+
+    Empirical observation (2026-04): TJK's PistBilgileri endpoint
+    returns *historical* readings, not today's live conditions.  A
+    fetch on 2026-04-26 yielded readings from 2026-03-08 through
+    2026-04-02.  Restricting the bind to ``target_date`` drops the
+    entire batch.
+
+    The honest semantics is: bind each reading to whichever race
+    matches (track, reading_date), regardless of when we scraped.
+    This retroactively enriches *past* races with their weather;
+    today's races stay NaN until TJK eventually publishes today's
+    reading (or never, if this endpoint truly is archive-only).
+
+    Same logic for steward_report signals — they bind by
+    (track, report_date).
+    """
+    candidates = (
+        session.query(ExternalSignal)
+        .filter(
+            ExternalSignal.source_name.in_(
+                ["tjk_track_conditions", "tjk_steward_reports"],
+            ),
+            ExternalSignal.race_id.is_(None),
+        )
+        .all()
+    )
+    if not candidates:
+        return 0
+
+    # Group candidates by (track_city, reading_date) so we can do one
+    # race lookup per group instead of one per signal.
+    groups: dict[tuple[str, date_type], list[ExternalSignal]] = {}
+    for sig in candidates:
+        payload = sig.payload or {}
+        rd = payload.get("reading_date") or payload.get("report_date")
+        try:
+            read_date = date_type.fromisoformat(rd) if rd else None
+        except ValueError:
+            read_date = None
+        track_city = (payload.get("track_city") or "").strip()
+        if not track_city or read_date is None:
+            continue
+        groups.setdefault((track_city, read_date), []).append(sig)
+
+    n_bound = 0
+    n_dup = 0
+    for (track_city, read_date), sigs in groups.items():
+        races = (
+            session.query(Race)
+            .join(Track, Track.id == Race.track_id)
+            .filter(Race.date == read_date, Track.name == track_city)
+            .all()
+        )
+        if not races:
+            continue
+        for sig in sigs:
+            sig.race_id = races[0].id
+            n_bound += 1
+            for race in races[1:]:
+                session.add(ExternalSignal(
+                    source_name=sig.source_name,
+                    signal_type=sig.signal_type,
+                    race_id=race.id,
+                    race_entry_id=None,
+                    value=sig.value,
+                    payload=sig.payload,
+                    captured_at=sig.captured_at,
+                ))
+                n_dup += 1
+
+    session.flush()
+    logger.info(
+        "track-conditions binder: %d primary, %d duplicated (across past races)",
+        n_bound, n_dup,
+    )
+    return n_bound + n_dup
+
+
 def fetch_and_resolve(
     session: Session, target_date: date_type, sources: Iterable[str] | None = None,
 ) -> dict[str, int]:
@@ -484,4 +567,6 @@ def fetch_and_resolve(
     bind_discipline_to_entries(session, target_date)
     # Workout name-match resolver (TJK İdman İstatistikleri).
     bind_workouts_to_entries(session, target_date)
+    # Track-conditions + steward-reports race-level binding.
+    bind_track_conditions_to_races(session, target_date)
     return results
