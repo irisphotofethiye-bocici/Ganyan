@@ -234,6 +234,133 @@ def resolve_unbound_signals(
     return n_updated
 
 
+def _normalize_jockey_name(name: str | None) -> str:
+    """Loose match key for jockey names — strip case, whitespace,
+    punctuation, dotted initials.  Disciplinary lists use uppercase
+    full names (``"SAMET ÇAKAR"``); race-card jockeys often appear as
+    ``"S. Çakar"`` or ``"Samet Çakar"``.  We squash both to a
+    diacritic-preserved lowercase last-name + first-initial pattern
+    so abbreviated forms still match.
+    """
+    if not name:
+        return ""
+    s = name.strip().lower()
+    s = re.sub(r"[\.\,\-_]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _name_match(jockey_full: str | None, entry_jockey: str | None) -> bool:
+    """Return True when the discipline-list ``jockey_full`` plausibly
+    matches the entry's ``entry_jockey`` field.
+
+    Exact-equal after normalisation, or last-name match when one side
+    has only an initial (``"S. Çakar"`` ↔ ``"Samet Çakar"``).
+    """
+    a = _normalize_jockey_name(jockey_full)
+    b = _normalize_jockey_name(entry_jockey)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    a_parts = a.split()
+    b_parts = b.split()
+    if len(a_parts) >= 2 and len(b_parts) >= 2:
+        # Last-name match required, plus first-initial overlap.
+        if a_parts[-1] == b_parts[-1]:
+            if a_parts[0][:1] == b_parts[0][:1]:
+                return True
+    return False
+
+
+def bind_discipline_to_entries(
+    session: Session, target_date: date_type,
+) -> int:
+    """Bind reported_jockey / penalized_jockey signals to today's entries.
+
+    Logic: for each unbound discipline row whose active window
+    [start_date, end_date] contains ``target_date``, find every race
+    on ``target_date`` whose jockey field matches the disciplinary
+    name.  One signal row stays per (signal, race_entry) match —
+    if the same disciplined jockey is listed in multiple races we
+    duplicate the signal (one per entry) so feature aggregation can
+    count distinct entries trivially.
+
+    Returns total updated/duplicated rows.
+    """
+    candidates = (
+        session.query(ExternalSignal)
+        .filter(
+            ExternalSignal.source_name == "tjk_discipline",
+            ExternalSignal.race_entry_id.is_(None),
+        )
+        .all()
+    )
+    if not candidates:
+        return 0
+
+    # Pre-load today's entries with their jockey strings.
+    entries_today = (
+        session.query(RaceEntry, Race)
+        .join(Race, Race.id == RaceEntry.race_id)
+        .filter(Race.date == target_date)
+        .all()
+    )
+    if not entries_today:
+        return 0
+
+    n_bound = 0
+    n_dup = 0
+    for sig in candidates:
+        payload = sig.payload or {}
+        # Only bind signals whose active window covers target_date.
+        start = payload.get("start_date")
+        end = payload.get("end_date")
+        try:
+            sd = date_type.fromisoformat(start) if start else None
+            ed = date_type.fromisoformat(end) if end else None
+        except ValueError:
+            sd = ed = None
+        if sd and target_date < sd:
+            continue
+        if ed and target_date > ed:
+            continue
+
+        jockey_full = payload.get("jockey_name")
+        matches = [
+            (entry, race) for entry, race in entries_today
+            if _name_match(jockey_full, entry.jockey)
+        ]
+        if not matches:
+            continue
+
+        # First match binds the original row; further matches duplicate
+        # the signal so each affected entry gets its own row (allows
+        # downstream feature COUNT(DISTINCT race_entry_id) to work).
+        first_entry, first_race = matches[0]
+        sig.race_entry_id = first_entry.id
+        sig.race_id = first_race.id
+        n_bound += 1
+        for entry, race in matches[1:]:
+            session.add(ExternalSignal(
+                source_name=sig.source_name,
+                signal_type=sig.signal_type,
+                race_id=race.id,
+                race_entry_id=entry.id,
+                value=sig.value,
+                payload=sig.payload,
+                captured_at=sig.captured_at,
+            ))
+            n_dup += 1
+
+    session.flush()
+    logger.info(
+        "discipline binder: %d primary, %d duplicated rows for %s",
+        n_bound, n_dup, target_date,
+    )
+    return n_bound + n_dup
+
+
 def fetch_and_resolve(
     session: Session, target_date: date_type, sources: Iterable[str] | None = None,
 ) -> dict[str, int]:
@@ -262,5 +389,8 @@ def fetch_and_resolve(
         except Exception:  # noqa: BLE001
             logger.exception("external: %s fetch failed", name)
             results[name] = 0
+    # Tipster-bundle resolver (yarisrehberi + future altılı sources).
     resolve_unbound_signals(session, target_date)
+    # Discipline name-match resolver (TJK reported/penalized jockeys).
+    bind_discipline_to_entries(session, target_date)
     return results

@@ -80,6 +80,10 @@ FEATURE_COLUMNS: list[str] = [
     # parimutuel market AGF — populated as ``external_signals``
     # accumulates from scheduled scrapes.  NaN until first scrape.
     "tipster_consensus",
+    # 1 when the listed jockey is on TJK's reported/penalized list,
+    # 0 when scraped clean, NaN pre-scrape.  Predicts substitute-
+    # rider scenarios before the morning program shows the change.
+    "jockey_discipline_flag",
     # Raw values — give the tree room to learn non-linear effects.
     "agf_raw",
     "hp_raw",
@@ -324,6 +328,7 @@ def build_training_frame(
                 "late_equipment_change": features.late_equipment_change,
                 "late_gate_change": features.late_gate_change,
                 "tipster_consensus": features.tipster_consensus,
+                "jockey_discipline_flag": features.jockey_discipline_flag,
                 # Raw
                 "agf_raw": float(entry.agf) if entry.agf is not None else np.nan,
                 "hp_raw": float(entry.hp) if entry.hp is not None else np.nan,
@@ -453,6 +458,7 @@ def build_race_frame(session: Session, race_id: int) -> pd.DataFrame:
             "late_equipment_change": features.late_equipment_change,
             "late_gate_change": features.late_gate_change,
             "tipster_consensus": features.tipster_consensus,
+            "jockey_discipline_flag": features.jockey_discipline_flag,
             "agf_raw": float(entry.agf) if entry.agf is not None else np.nan,
             "hp_raw": float(entry.hp) if entry.hp is not None else np.nan,
             "weight_kg_raw": (

@@ -65,6 +65,12 @@ class HorseFeatures:
     # public aggregator sites (currently yarisrehberi.com).  ``None``
     # when no signals captured.  Higher = more "expert consensus".
     tipster_consensus: float | None = None
+    # 1 when the listed jockey is on TJK's reported (medical) or
+    # penalized list during the race date; 0 when scraped clean;
+    # None pre-scrape.  Substitute rider expected — different feature
+    # from late_jockey_change (which detects the substitution after
+    # the snapshot diff catches it; this one detects BEFORE).
+    jockey_discipline_flag: float | None = None
 
 
 def compute_agf_edge(
@@ -679,6 +685,51 @@ def lookup_agf_reliability(
     return table.get((race_type, bucket, surface))
 
 
+def compute_jockey_discipline_flag(
+    session: Session, race_entry_id: int | None,
+) -> float | None:
+    """1 when this entry's listed jockey is on TJK's reported or penalized
+    list with an active discipline window covering the race date; else 0.
+
+    Strong sürpriz-at indicator: a disciplined jockey will be replaced
+    by a substitute (often an apprentice).  The substitute's identity
+    isn't in the morning program, so the model would otherwise be
+    blind to the change.
+
+    Returns ``None`` when the discipline scrape hasn't run yet — keeps
+    "I don't know" distinguishable from "I know there's no flag".
+    """
+    from ganyan.db.models import ExternalSignal
+
+    if race_entry_id is None:
+        return None
+    # Existence query.  Any matching signal — regardless of reported
+    # vs penalized — flips the flag to 1.0.  Both kinds of discipline
+    # produce the same operational outcome (substitute rider).
+    q = (
+        session.query(ExternalSignal.id)
+        .filter(
+            ExternalSignal.race_entry_id == race_entry_id,
+            ExternalSignal.source_name == "tjk_discipline",
+        )
+        .limit(1)
+    )
+    if session.query(q.exists()).scalar():
+        return 1.0
+    # Distinguish "no signal at all" (None — pre-scrape) from "scraped
+    # but clean" (0).  Heuristic: if any tjk_discipline rows exist for
+    # any entry today, we've scraped — so this entry being absent
+    # means clean = 0.  Cheap because the index is selective.
+    any_today = (
+        session.query(ExternalSignal.id)
+        .filter(ExternalSignal.source_name == "tjk_discipline")
+        .limit(1)
+    )
+    if session.query(any_today.exists()).scalar():
+        return 0.0
+    return None
+
+
 def compute_tipster_consensus(
     session: Session, race_entry_id: int | None,
 ) -> float | None:
@@ -942,6 +993,9 @@ def extract_features(
             features.late_gate_change,
         ) = compute_late_program_changes(session, race_entry_id)
         features.tipster_consensus = compute_tipster_consensus(
+            session, race_entry_id,
+        )
+        features.jockey_discipline_flag = compute_jockey_discipline_flag(
             session, race_entry_id,
         )
         features.jockey_win_rate = compute_jockey_win_rate(

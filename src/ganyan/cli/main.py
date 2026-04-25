@@ -293,17 +293,21 @@ def scrape_external(
     else:
         target = datetime.strptime(target_date, "%Y-%m-%d").date()
 
-    from ganyan.scraper.external.resolver import resolve_unbound_signals
+    from ganyan.scraper.external.resolver import (
+        bind_discipline_to_entries, resolve_unbound_signals,
+    )
 
     session = get_session()
     try:
         plugin = REGISTRY[source]()
         rows = plugin.fetch_for_date(session, target)
         n = persist_signals(session, rows)
-        # Resolution pass: bind unbound rows to (race_id, race_entry_id)
-        # using the altılı bundle heuristic.  Same session, single
-        # commit so partial failures roll back cleanly.
+        # Resolution pass: each plugin's signals get their appropriate
+        # binder.  Same session, single commit so partial failures
+        # roll back cleanly.
         bound = resolve_unbound_signals(session, target, source_name=source)
+        if source == "tjk_discipline":
+            bound += bind_discipline_to_entries(session, target)
         session.commit()
     finally:
         session.close()
