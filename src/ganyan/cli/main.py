@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 @scrape_app.callback(invoke_without_command=True)
 def scrape(
+    ctx: typer.Context,
     today: bool = typer.Option(False, "--today", help="Fetch today's race cards"),
     results: bool = typer.Option(False, "--results", help="Fetch today's results"),
     backfill: bool = typer.Option(False, "--backfill", help="Run backfill from a date"),
@@ -60,6 +61,8 @@ def scrape(
     ),
 ) -> None:
     """Scrape race data from TJK."""
+    if ctx.invoked_subcommand is not None:
+        return  # `scrape external <source>` etc. — let the subcommand run.
     settings = get_settings()
     logging.basicConfig(level=settings.log_level)
 
@@ -248,6 +251,58 @@ async def _run_full_results_backfill(
         raise typer.Exit(code=1)
     finally:
         session.close()
+
+
+@scrape_app.command("external")
+def scrape_external(
+    source: str = typer.Argument(
+        ..., help="Source name (e.g. 'yarisrehberi'). See `--list`.",
+    ),
+    target_date: str = typer.Option(
+        None, "--date", help="YYYY-MM-DD; defaults to today.",
+    ),
+) -> None:
+    """Run a third-party signal scraper.
+
+    Plugins are registered in :mod:`ganyan.scraper.external`.  Each
+    persists its findings to the ``external_signals`` table.
+    """
+    from ganyan.scraper.external import REGISTRY
+    from ganyan.scraper.external.base import persist_signals
+    from ganyan.db import get_session
+
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+
+    if source == "--list" or source == "list":
+        typer.echo("Registered external sources:")
+        for name, cls in sorted(REGISTRY.items()):
+            sig_types = ", ".join(cls.signal_types)
+            typer.echo(f"  {name:<20} signals: {sig_types}")
+        return
+
+    if source not in REGISTRY:
+        typer.echo(
+            f"Unknown source {source!r}. "
+            f"Known: {sorted(REGISTRY)}", err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if target_date is None:
+        target = date.today()
+    else:
+        target = datetime.strptime(target_date, "%Y-%m-%d").date()
+
+    session = get_session()
+    try:
+        plugin = REGISTRY[source]()
+        rows = plugin.fetch_for_date(session, target)
+        n = persist_signals(session, rows)
+        session.commit()
+    finally:
+        session.close()
+
+    typer.echo(f"{source} → {n} signal row(s) persisted for {target}")
 
 
 # ---------------------------------------------------------------------------

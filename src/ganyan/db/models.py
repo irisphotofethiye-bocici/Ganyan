@@ -200,6 +200,45 @@ class AgfSnapshot(Base):
     gate_number: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
 
+class ExternalSignal(Base):
+    """A signal extracted from a third-party (non-TJK) source.
+
+    The plugin framework in :mod:`ganyan.scraper.external` writes rows
+    here.  Polymorphic by ``(source_name, signal_type)``: e.g.
+    ``("yarisrehberi", "tipster_pick")`` for an aggregator's pick,
+    ``("altiliganyan", "reported_jockey")`` for a flagged rider.
+
+    Either ``race_id`` or ``race_entry_id`` is typically populated
+    after the source has been resolved against TJK's program; raw
+    ingestion-time rows may have neither and rely on ``payload`` to
+    carry the un-resolved identifiers (e.g. "race_number 3 on track
+    Ankara, horse_number 7") for a later resolver pass.
+    """
+
+    __tablename__ = "external_signals"
+    __table_args__ = (
+        Index("ix_external_signals_source_type", "source_name", "signal_type"),
+        Index("ix_external_signals_race_entry_id", "race_entry_id"),
+        Index("ix_external_signals_race_id", "race_id"),
+        Index("ix_external_signals_captured_at", "captured_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_name: Mapped[str] = mapped_column(String(50))
+    signal_type: Mapped[str] = mapped_column(String(50))
+    race_id: Mapped[int | None] = mapped_column(
+        ForeignKey("races.id", ondelete="CASCADE"), nullable=True,
+    )
+    race_entry_id: Mapped[int | None] = mapped_column(
+        ForeignKey("race_entries.id", ondelete="CASCADE"), nullable=True,
+    )
+    value: Mapped[float | None] = mapped_column(Numeric(10, 3), nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False,
+    )
+
+
 class ScrapeLog(Base):
     __tablename__ = "scrape_log"
     __table_args__ = (
