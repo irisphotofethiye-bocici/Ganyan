@@ -176,6 +176,38 @@ def _job_agf_snapshot(settings: Settings) -> None:
     )
 
 
+def _job_external_signals(settings: Settings) -> None:
+    """Run every registered third-party signal scraper for today.
+
+    Persists raw rows then runs the resolver to bind them to TJK
+    race / race_entry IDs.  Idempotent — re-running just appends new
+    rows; the resolver only updates rows whose race_entry_id is null.
+
+    Intentional ordering: fires AFTER the morning_card job so the
+    resolver has TJK's program available to bind against.
+    """
+    del settings  # plugins manage their own HTTP clients
+    from ganyan.db import get_session
+    from ganyan.scraper.external.resolver import fetch_and_resolve
+
+    today = date.today()
+    logger.info("scheduler: external-signals starting for %s", today)
+
+    session = get_session()
+    try:
+        results = fetch_and_resolve(session, today)
+        session.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("scheduler: external-signals failed")
+        session.rollback()
+        return
+    finally:
+        session.close()
+
+    counts = ", ".join(f"{k}={v}" for k, v in sorted(results.items())) or "no sources"
+    logger.info("scheduler: external-signals done (%s)", counts)
+
+
 def _job_results_poll(settings: Settings) -> None:
     """Pull today's results — keeps the DB current throughout the day."""
     from ganyan.db import get_session
@@ -317,6 +349,25 @@ def _add_jobs(scheduler, settings: Settings) -> None:
         args=[settings],
         id="results_poll",
         name="Results polling",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=600,
+    )
+    scheduler.add_job(
+        _job_external_signals,
+        # Twice per day: once in the morning after the program drops
+        # so tipster picks for today's card are captured early, then
+        # again pre-evening so any late-published picks are caught
+        # before the last race.  Cheap (single HTTP fetch + parse) so
+        # extra runs are harmless.
+        CronTrigger(
+            minute="15",
+            hour="9,18",
+            timezone=_TZ,
+        ),
+        args=[settings],
+        id="external_signals",
+        name="External-data plugins (tipsters, etc.)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=600,

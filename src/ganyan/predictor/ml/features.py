@@ -75,6 +75,11 @@ FEATURE_COLUMNS: list[str] = [
     "late_jockey_change",
     "late_equipment_change",
     "late_gate_change",
+    # Count of distinct tipster tickets (from external aggregators)
+    # that picked this horse.  Independent crowd-wisdom signal vs the
+    # parimutuel market AGF — populated as ``external_signals``
+    # accumulates from scheduled scrapes.  NaN until first scrape.
+    "tipster_consensus",
     # Raw values — give the tree room to learn non-linear effects.
     "agf_raw",
     "hp_raw",
@@ -318,6 +323,7 @@ def build_training_frame(
                 "late_jockey_change": features.late_jockey_change,
                 "late_equipment_change": features.late_equipment_change,
                 "late_gate_change": features.late_gate_change,
+                "tipster_consensus": features.tipster_consensus,
                 # Raw
                 "agf_raw": float(entry.agf) if entry.agf is not None else np.nan,
                 "hp_raw": float(entry.hp) if entry.hp is not None else np.nan,
@@ -446,6 +452,7 @@ def build_race_frame(session: Session, race_id: int) -> pd.DataFrame:
             "late_jockey_change": features.late_jockey_change,
             "late_equipment_change": features.late_equipment_change,
             "late_gate_change": features.late_gate_change,
+            "tipster_consensus": features.tipster_consensus,
             "agf_raw": float(entry.agf) if entry.agf is not None else np.nan,
             "hp_raw": float(entry.hp) if entry.hp is not None else np.nan,
             "weight_kg_raw": (

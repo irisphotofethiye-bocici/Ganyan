@@ -61,6 +61,10 @@ class HorseFeatures:
     late_jockey_change: float | None = None
     late_equipment_change: float | None = None
     late_gate_change: float | None = None
+    # Number of distinct tipster tickets that picked this horse on
+    # public aggregator sites (currently yarisrehberi.com).  ``None``
+    # when no signals captured.  Higher = more "expert consensus".
+    tipster_consensus: float | None = None
 
 
 def compute_agf_edge(
@@ -675,6 +679,45 @@ def lookup_agf_reliability(
     return table.get((race_type, bucket, surface))
 
 
+def compute_tipster_consensus(
+    session: Session, race_entry_id: int | None,
+) -> float | None:
+    """Count distinct tipster tickets that picked this entry.
+
+    Pulled from ``external_signals`` where ``signal_type =
+    'tipster_pick'``.  We deduplicate by ``payload->ticket_timestamp``
+    so a single ticket containing the same horse multiple times (rare
+    but possible in box-style picks) counts once.
+
+    Returns ``None`` when no signals exist for the entry — keeps the
+    feature distinguishable from "0 tipsters picked it" via NaN
+    handling at the model level.
+    """
+    from ganyan.db.models import ExternalSignal
+
+    if race_entry_id is None:
+        return None
+    rows = (
+        session.query(ExternalSignal.payload)
+        .filter(
+            ExternalSignal.race_entry_id == race_entry_id,
+            ExternalSignal.signal_type == "tipster_pick",
+        )
+        .all()
+    )
+    if not rows:
+        return None
+    seen: set[str] = set()
+    for (payload,) in rows:
+        if not payload:
+            continue
+        ts = payload.get("ticket_timestamp")
+        title = payload.get("ticket_title") or ""
+        # (timestamp, title) is the de-facto ticket key.
+        seen.add(f"{ts}|{title}")
+    return float(len(seen))
+
+
 def compute_late_program_changes(
     session: Session, race_entry_id: int | None,
 ) -> tuple[float | None, float | None, float | None]:
@@ -898,6 +941,9 @@ def extract_features(
             features.late_equipment_change,
             features.late_gate_change,
         ) = compute_late_program_changes(session, race_entry_id)
+        features.tipster_consensus = compute_tipster_consensus(
+            session, race_entry_id,
+        )
         features.jockey_win_rate = compute_jockey_win_rate(
             session, jockey, before_date=race_date,
         )
