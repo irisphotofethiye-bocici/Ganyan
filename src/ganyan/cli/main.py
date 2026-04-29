@@ -778,15 +778,15 @@ def train(
     ),
     objective: str = typer.Option(
         "rank", "--objective",
-        help="'rank' (LambdaRank), 'ev' (regression on realised return), "
-             "or 'finish_time' (regression on actual race seconds — "
-             "sort ascending = winner ranker, joins ensemble as 4th vote).",
+        help="'rank' (LambdaRank) or 'finish_time' (regression on actual "
+             "race seconds — sort ascending = winner ranker, joins "
+             "ensemble as 4th vote).",
     ),
     model_name: str = typer.Option(
         None, "--model-name",
         help="Filename stem for the saved model.  Default depends on "
-             "objective: lightgbm_ranker / lightgbm_ev / "
-             "lightgbm_finish_time, with `_value` suffix when --exclude-agf.",
+             "objective: lightgbm_ranker / lightgbm_finish_time, with "
+             "`_value` suffix when --exclude-agf.",
     ),
 ) -> None:
     """Fit a LightGBM model on resulted races and save to disk.
@@ -795,10 +795,8 @@ def train(
 
     - ``--objective rank`` (default) — LambdaRank predicting the winner.
       Top-1/Top-3 accuracy is the headline metric.
-    - ``--objective ev`` — regression on realised return per 1-TL bet
-      (winner = ganyan_payout-1, losers = -1).  Output is per-horse EV;
-      bet horses where predicted EV > 0.  Headline metric is mean
-      realised EV on the model's top-1 picks across the holdout.
+    - ``--objective finish_time`` — regression on actual race seconds.
+      Sort ascending = winner ranker; joins the ensemble as a vote.
     """
     # When a subcommand (linear / cv / specialists) is invoked, the
     # callback still runs under ``invoke_without_command=True``; skip
@@ -821,15 +819,13 @@ def train(
         start = date.today() - timedelta(days=_DEFAULT_TRAIN_WINDOW_DAYS)
     end = datetime.strptime(to_date, "%Y-%m-%d").date() if to_date else None
 
-    if objective not in {"rank", "ev", "finish_time"}:
+    if objective not in {"rank", "finish_time"}:
         raise typer.BadParameter(
-            f"objective must be 'rank', 'ev', or 'finish_time' (got {objective!r})",
+            f"objective must be 'rank' or 'finish_time' (got {objective!r})",
         )
     excluded = ["agf_edge", "agf_raw"] if exclude_agf else None
     if model_name is None:
-        if objective == "ev":
-            model_name = "lightgbm_ev_value" if exclude_agf else "lightgbm_ev"
-        elif objective == "finish_time":
+        if objective == "finish_time":
             model_name = (
                 "lightgbm_finish_time_value" if exclude_agf
                 else "lightgbm_finish_time"
@@ -1955,6 +1951,29 @@ def advice_cmd(
         0.25, "--kelly",
         help="Kelly multiplier (0.25 = quarter-Kelly, the standard).",
     ),
+    cohort_filter: bool = typer.Option(
+        True, "--cohort-filter/--no-cohort-filter",
+        help="Skip races in known-loss cohorts: Maiden /Dişi (-46%% ROI), "
+             "field≥13 (-22%%), Şanlıurfa/Bursa (-27%%/-34%%). Default ON.",
+    ),
+    bayes_skip: bool = typer.Option(
+        True, "--bayes-skip/--no-bayes-skip",
+        help="Skip races where Bayes posterior says top-1 isn't strong enough. "
+             "Holdout: gate at mean≥35%% lifts top-1 from 35%% to 50%%. "
+             "Default ON when posterior file present.",
+    ),
+    bayes_min_prob: float = typer.Option(
+        0.35, "--bayes-min-prob",
+        help="Bayes top-1 mean threshold (0-1). Skip race if below.",
+    ),
+    bayes_min_lo5: float = typer.Option(
+        0.20, "--bayes-min-lo5",
+        help="Bayes top-1 5th-percentile threshold (0-1). Skip race if below.",
+    ),
+    bayes_posterior: str = typer.Option(
+        "models/bayes_pl_v1", "--bayes-posterior",
+        help="Path base (no suffix) to .nc/.indices.json posterior files.",
+    ),
     json_output: bool = typer.Option(False, "--json", help="JSON output."),
 ) -> None:
     """Günün bahis tavsiyeleri — scheduler'ın ürettiği picks'i "bugün ne
@@ -1965,10 +1984,25 @@ def advice_cmd(
     Sadece BETTING stratejileri gösterilir (uclu_top1 / uclu_box6 /
     sirali_ikili_top1) — ganyan_top1 referans olduğu için dışarıda.
     """
+    def _cohort_skip_reason(race) -> str | None:
+        rt = (race.race_type or "")
+        # Filly-maiden: -45.9% ROI on n=74 picks
+        if "Maiden /Dişi" in rt or "Maiden Dişi" in rt:
+            return "Maiden /Dişi (-46% ROI hist.)"
+        # Large fields: -22% ROI on n=373, hit rate drops to 28%
+        n_entries = len(race.entries)
+        if n_entries >= 13:
+            return f"field {n_entries}≥13 (-22% ROI hist.)"
+        # Worst tracks: Şanlıurfa -27%, Bursa -34%
+        track_name = race.track.name if race.track else ""
+        if track_name in {"Şanlıurfa", "Bursa"}:
+            return f"track {track_name} (heavy losing cohort)"
+        return None
     settings = get_settings()
     logging.basicConfig(level=settings.log_level)
 
     from datetime import date as _date, datetime as _dt
+    from pathlib import Path as _Path
     from ganyan.db import get_session
     from ganyan.db.models import Race, Pick, RaceStatus
     from ganyan.predictor.kelly import strategy_edge_stats, suggested_stake_tl
@@ -1979,6 +2013,74 @@ def advice_cmd(
         _dt.strptime(date_str, "%Y-%m-%d").date() if date_str else _date.today()
     )
     BETTING_STRATEGIES = ("uclu_top1", "uclu_box6", "sirali_ikili_top1")
+
+    bayes_idata = bayes_frame = None
+    bayes_posterior_path = _Path(bayes_posterior)
+    if bayes_skip:
+        nc_file = bayes_posterior_path.with_suffix(".nc")
+        idx_file = bayes_posterior_path.with_suffix(".indices.json")
+        if nc_file.exists() and idx_file.exists():
+            try:
+                from ganyan.predictor.bayes.trainer import load_posterior
+                bayes_idata, bayes_frame = load_posterior(bayes_posterior_path)
+            except Exception as e:  # noqa: BLE001
+                typer.echo(
+                    f"⚠️  Bayes posterior load failed ({e}); skipping bayes gate.",
+                    err=True,
+                )
+                bayes_idata = bayes_frame = None
+        else:
+            typer.echo(
+                f"⚠️  Bayes posterior not found at {bayes_posterior_path}; "
+                f"skipping bayes gate. Train via "
+                f"`uv run python logs/bayes_train.py`.",
+                err=True,
+            )
+
+    def _bayes_top_pred(race) -> "BayesPrediction | None":
+        if bayes_idata is None or bayes_frame is None:
+            return None
+        from ganyan.predictor.bayes.predictor import (
+            BayesPrediction, predict_from_posterior,
+        )
+        entries = list(race.entries)
+        if len(entries) < 3:
+            return None
+        race_in = {
+            "horse_ids": [e.horse_id for e in entries],
+            "horse_names": [
+                e.horse.name if e.horse else "?" for e in entries
+            ],
+            "jockeys": [e.jockey or "" for e in entries],
+            "sires": [
+                (e.horse.sire or "") if e.horse else "" for e in entries
+            ],
+            "track_id": race.track_id,
+            "distance_meters": race.distance_meters or 0,
+            "agfs": [
+                float(e.agf) if e.agf is not None else 0.0 for e in entries
+            ],
+        }
+        try:
+            preds = predict_from_posterior(bayes_idata, bayes_frame, race_in)
+        except Exception:  # noqa: BLE001
+            return None
+        return preds[0] if preds else None
+
+    def _bayes_skip_reason(top: "BayesPrediction | None") -> str | None:
+        if top is None:
+            return None
+        if top.mean_prob < bayes_min_prob:
+            return (
+                f"Bayes top-1 mean {top.mean_prob:.0%}<"
+                f"{bayes_min_prob:.0%}"
+            )
+        if top.lo_5 < bayes_min_lo5:
+            return (
+                f"Bayes top-1 lo_5 {top.lo_5:.0%}<"
+                f"{bayes_min_lo5:.0%}"
+            )
+        return None
 
     session = get_session()
     try:
@@ -2036,6 +2138,15 @@ def advice_cmd(
                     winner_entry.horse.name if winner_entry.horse
                     else f"#{winner_entry.horse_id}"
                 )
+
+        # Bayes posterior predictions per race — compute while session
+        # is open so e.horse / e.horse.sire lazy-loads still work.
+        bayes_top_by_race: dict[int, "BayesPrediction"] = {}
+        if bayes_idata is not None and bayes_frame is not None:
+            for r in races:
+                top = _bayes_top_pred(r)
+                if top is not None:
+                    bayes_top_by_race[r.id] = top
     finally:
         session.close()
 
@@ -2046,6 +2157,32 @@ def advice_cmd(
             rpicks = picks_by_race.get(race.id, {})
             if not rpicks:
                 continue
+            if cohort_filter:
+                reason = _cohort_skip_reason(race)
+                if reason:
+                    out.append({
+                        "race_id": race.id,
+                        "track": race.track.name if race.track else None,
+                        "race_number": race.race_number,
+                        "post_time": race.post_time,
+                        "skipped_cohort_reason": reason,
+                    })
+                    continue
+            bayes_top = bayes_top_by_race.get(race.id)
+            if bayes_skip:
+                br = _bayes_skip_reason(bayes_top)
+                if br:
+                    out.append({
+                        "race_id": race.id,
+                        "track": race.track.name if race.track else None,
+                        "race_number": race.race_number,
+                        "post_time": race.post_time,
+                        "skipped_bayes_reason": br,
+                        "bayes_top1_mean": bayes_top.mean_prob if bayes_top else None,
+                        "bayes_top1_lo5": bayes_top.lo_5 if bayes_top else None,
+                        "bayes_top1_hi95": bayes_top.hi_95 if bayes_top else None,
+                    })
+                    continue
             pick_data = {}
             for strat, p in rpicks.items():
                 prob = float(p.model_prob_pct) if p.model_prob_pct else 0.0
@@ -2081,6 +2218,10 @@ def advice_cmd(
                 "distance_meters": race.distance_meters,
                 "status": race.status.value if race.status else None,
                 "picks": pick_data,
+                "bayes_top1_horse": bayes_top.horse_name if bayes_top else None,
+                "bayes_top1_mean": bayes_top.mean_prob if bayes_top else None,
+                "bayes_top1_lo5": bayes_top.lo_5 if bayes_top else None,
+                "bayes_top1_hi95": bayes_top.hi_95 if bayes_top else None,
             }
             out.append(item)
         meta = {
@@ -2114,12 +2255,37 @@ def advice_cmd(
     n_races_with_any_hit = 0
     total_payout = 0.0
     skipped_low_prob = 0
+    skipped_cohort = 0              # races skipped by --cohort-filter
+    skipped_bayes = 0               # races skipped by --bayes-skip
     n_no_pool = 0                  # picks for strategies without a published pool
 
     for race in races:
         rpicks = picks_by_race.get(race.id, {})
         if not rpicks:
             continue
+        if cohort_filter:
+            reason = _cohort_skip_reason(race)
+            if reason:
+                track = race.track.name if race.track else "?"
+                post = race.post_time or "--:--"
+                typer.echo(
+                    f"{track:<10} R{race.race_number:<2} {post}  "
+                    f"[SKIP cohort] {reason}\n"
+                )
+                skipped_cohort += 1
+                continue
+        bayes_top = bayes_top_by_race.get(race.id)
+        if bayes_skip:
+            br = _bayes_skip_reason(bayes_top)
+            if br:
+                track = race.track.name if race.track else "?"
+                post = race.post_time or "--:--"
+                typer.echo(
+                    f"{track:<10} R{race.race_number:<2} {post}  "
+                    f"[SKIP bayes] {br}\n"
+                )
+                skipped_bayes += 1
+                continue
         result = results_by_race.get(race.id)
         status_badge = ""
         if race.status == RaceStatus.resulted:
@@ -2132,6 +2298,12 @@ def advice_cmd(
         header = (f"{track:<10} R{race.race_number:<2} {post}  "
                   f"{race.distance_meters or 0}m{status_badge}")
         typer.echo(header)
+        if bayes_top is not None:
+            typer.echo(
+                f"  bayes top-1: {bayes_top.horse_name[:22]:<22} "
+                f"{bayes_top.mean_prob:.0%} "
+                f"[{bayes_top.lo_5:.0%}–{bayes_top.hi_95:.0%}]"
+            )
 
         race_had_hit = False
         for strat in BETTING_STRATEGIES:
@@ -2242,6 +2414,14 @@ def advice_cmd(
         typer.echo(f"races with any hit     : {n_races_with_any_hit}")
     if skipped_low_prob:
         typer.echo(f"skipped (low prob)     : {skipped_low_prob} picks")
+    if skipped_cohort:
+        typer.echo(f"skipped (cohort filter): {skipped_cohort} races "
+                   f"(Maiden /Dişi · field≥13 · Şanlıurfa/Bursa)")
+    if skipped_bayes:
+        typer.echo(
+            f"skipped (bayes gate)   : {skipped_bayes} races "
+            f"(top-1 mean<{bayes_min_prob:.0%} or lo_5<{bayes_min_lo5:.0%})"
+        )
 
 
 @app.command("tune-thresholds")
