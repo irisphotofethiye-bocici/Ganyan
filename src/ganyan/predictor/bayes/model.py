@@ -1,163 +1,45 @@
-"""PyMC Plackett-Luce models — simple and hierarchical."""
+"""PyMC Plackett-Luce models — simple and hierarchical (vectorized)."""
 from __future__ import annotations
 
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
-from ganyan.predictor.bayes.data import TrainingFrame
+from ganyan.predictor.bayes.data import TrainingFrame, matrices_for_pymc
 
 
-def _plackett_luce_loglik(theta, orderings):
-    total = pt.zeros((), dtype="float64")
-    for order in orderings:
-        order_arr = pt.constant(order, dtype="int64")
-        chosen = theta[order_arr]
-        rev = chosen[::-1]
-        max_rev = rev.max()
-        log_cumsum = pt.cumsum(pt.exp(rev - max_rev), axis=0)
-        log_remaining_rev = pt.log(log_cumsum) + max_rev
-        log_remaining = log_remaining_rev[::-1]
-        total = total + pt.sum(chosen - log_remaining)
-    return total
+def _vectorized_pl_loglik(score_matrix, valid_mask):
+    """Plackett-Luce loglik on a padded (R, K_max) score matrix.
+
+    For ordering positions k = 0..K-1 in race r:
+        loglik_r = Σ_k (score[r,k] − logsumexp_{j≥k} score[r,j])
+
+    Padding is masked out: pad positions get safe_score = −1e9 so they
+    contribute 0 to the tail sums and to the per-position loglik.
+    """
+    safe_score = pt.where(valid_mask, score_matrix, -1e9)
+    score_max = safe_score.max(axis=1, keepdims=True)
+    shifted = safe_score - score_max
+    exp_shifted = pt.exp(shifted)
+    rev = exp_shifted[:, ::-1]
+    cum_rev = pt.cumsum(rev, axis=1)
+    cum = cum_rev[:, ::-1]
+    log_tail_sum = pt.log(cum) + score_max
+    pos_loglik = safe_score - log_tail_sum
+    pos_loglik_valid = pt.where(valid_mask, pos_loglik, 0.0)
+    return pos_loglik_valid.sum()
 
 
 def build_simple_pl_model(frame: TrainingFrame) -> pm.Model:
     n_horses = len(frame.horse_index)
-    orderings = list(frame.orderings.values())
+    mats = matrices_for_pymc(frame)
+    horse_idx_mat = mats["horse_idx_mat"]
+    valid_mask = mats["valid_mask"]
     coords = {"horse": list(range(n_horses))}
     with pm.Model(coords=coords) as model:
         theta = pm.Normal("theta", mu=0.0, sigma=1.0, dims="horse")
-        pm.Potential("plackett_luce", _plackett_luce_loglik(theta, orderings))
-    return model
-
-
-def fit_advi(model: pm.Model, n_iter: int = 30_000, seed: int = 0):
-    with model:
-        approx = pm.fit(n_iter, method="advi", random_seed=seed, progressbar=False)
-        idata = approx.sample(draws=2_000, random_seed=seed)
-    return idata
-
-
-def _plackett_luce_loglik_with_offsets(
-    theta, alpha, gamma,
-    orderings, jockey_per_entry, track_dist_per_race,
-):
-    total = pt.zeros((), dtype="float64")
-    flat_idx = 0
-    for race_idx, order in enumerate(orderings):
-        order_arr = pt.constant(order, dtype="int64")
-        n = len(order)
-        jockey_slice = jockey_per_entry[flat_idx : flat_idx + n]
-        flat_idx += n
-        jockey_arr = pt.constant(jockey_slice, dtype="int64")
-        td_idx = track_dist_per_race[race_idx]
-        score = theta[order_arr] + alpha[jockey_arr] + gamma[td_idx]
-        rev = score[::-1]
-        max_rev = rev.max()
-        log_cumsum = pt.cumsum(pt.exp(rev - max_rev), axis=0)
-        log_remaining_rev = pt.log(log_cumsum) + max_rev
-        log_remaining = log_remaining_rev[::-1]
-        total = total + pt.sum(score - log_remaining)
-    return total
-
-
-def _build_horse_to_sire(frame: TrainingFrame, n_horses: int) -> np.ndarray:
-    horse_to_sire = np.zeros(n_horses, dtype="int64")
-    seen: set[int] = set()
-    flat_horses = [h for order in frame.orderings.values() for h in order]
-    for h, s in zip(flat_horses, frame.sire_of_horse_in_race):
-        if h not in seen:
-            horse_to_sire[h] = s
-            seen.add(h)
-    return horse_to_sire
-
-
-def _agf_zscore_per_entry(
-    orderings: list[list[int]], agf_per_entry: list[float],
-) -> list[float]:
-    out: list[float] = []
-    flat_idx = 0
-    for order in orderings:
-        n = len(order)
-        slice_ = np.asarray(agf_per_entry[flat_idx : flat_idx + n], dtype="float64")
-        flat_idx += n
-        mu = slice_.mean()
-        sd = slice_.std() if slice_.std() > 1e-9 else 1.0
-        out.extend(((slice_ - mu) / sd).tolist())
-    return out
-
-
-def _plackett_luce_loglik_with_agf(
-    theta, alpha, gamma, delta,
-    orderings, jockey_per_entry, track_dist_per_race, agf_z_per_entry,
-):
-    total = pt.zeros((), dtype="float64")
-    flat_idx = 0
-    for race_idx, order in enumerate(orderings):
-        order_arr = pt.constant(order, dtype="int64")
-        n = len(order)
-        jockey_slice = jockey_per_entry[flat_idx : flat_idx + n]
-        agf_slice = agf_z_per_entry[flat_idx : flat_idx + n]
-        flat_idx += n
-        jockey_arr = pt.constant(jockey_slice, dtype="int64")
-        agf_arr = pt.constant(agf_slice, dtype="float64")
-        td_idx = track_dist_per_race[race_idx]
-        score = (
-            theta[order_arr]
-            + alpha[jockey_arr]
-            + gamma[td_idx]
-            + delta * agf_arr
-        )
-        rev = score[::-1]
-        max_rev = rev.max()
-        log_cumsum = pt.cumsum(pt.exp(rev - max_rev), axis=0)
-        log_remaining_rev = pt.log(log_cumsum) + max_rev
-        log_remaining = log_remaining_rev[::-1]
-        total = total + pt.sum(score - log_remaining)
-    return total
-
-
-def build_hierarchical_pl_model_with_agf(frame: TrainingFrame) -> pm.Model:
-    n_horses = len(frame.horse_index)
-    n_jockeys = len(frame.jockey_index)
-    n_sires = len(frame.sire_index)
-    n_track_dist = len(frame.track_dist_index)
-    orderings = list(frame.orderings.values())
-    track_dist_per_race = [frame.track_dist_of_race[rid] for rid in frame.orderings]
-    agf_z = _agf_zscore_per_entry(orderings, frame.agf_of_horse_in_race)
-
-    coords = {
-        "horse": list(range(n_horses)),
-        "jockey": list(range(n_jockeys)),
-        "sire": list(range(n_sires)),
-        "track_dist": list(range(n_track_dist)),
-    }
-    horse_to_sire = _build_horse_to_sire(frame, n_horses)
-
-    with pm.Model(coords=coords) as model:
-        sigma_theta = pm.HalfNormal("sigma_theta", 1.0)
-        sigma_alpha = pm.HalfNormal("sigma_alpha", 0.5)
-        sigma_beta = pm.HalfNormal("sigma_beta", 0.5)
-        sigma_gamma = pm.HalfNormal("sigma_gamma", 0.5)
-
-        beta_sire = pm.Normal("beta_sire", 0.0, sigma_beta, dims="sire")
-        mu_horse = beta_sire[horse_to_sire]
-        theta = pm.Normal("theta", mu=mu_horse, sigma=sigma_theta, dims="horse")
-        alpha_jockey = pm.Normal("alpha_jockey", 0.0, sigma_alpha, dims="jockey")
-        gamma_track_dist = pm.Normal(
-            "gamma_track_dist", 0.0, sigma_gamma, dims="track_dist",
-        )
-        delta_agf = pm.Normal("delta_agf", 0.0, 1.0)
-
-        pm.Potential(
-            "plackett_luce_agf",
-            _plackett_luce_loglik_with_agf(
-                theta, alpha_jockey, gamma_track_dist, delta_agf,
-                orderings, frame.jockey_of_horse_in_race,
-                track_dist_per_race, agf_z,
-            ),
-        )
+        score = theta[horse_idx_mat]
+        pm.Potential("plackett_luce", _vectorized_pl_loglik(score, valid_mask))
     return model
 
 
@@ -166,8 +48,7 @@ def build_hierarchical_pl_model(frame: TrainingFrame) -> pm.Model:
     n_jockeys = len(frame.jockey_index)
     n_sires = len(frame.sire_index)
     n_track_dist = len(frame.track_dist_index)
-    orderings = list(frame.orderings.values())
-    track_dist_per_race = [frame.track_dist_of_race[rid] for rid in frame.orderings]
+    mats = matrices_for_pymc(frame)
 
     coords = {
         "horse": list(range(n_horses)),
@@ -175,8 +56,6 @@ def build_hierarchical_pl_model(frame: TrainingFrame) -> pm.Model:
         "sire": list(range(n_sires)),
         "track_dist": list(range(n_track_dist)),
     }
-    horse_to_sire = _build_horse_to_sire(frame, n_horses)
-
     with pm.Model(coords=coords) as model:
         sigma_theta = pm.HalfNormal("sigma_theta", 1.0)
         sigma_alpha = pm.HalfNormal("sigma_alpha", 0.5)
@@ -184,17 +63,68 @@ def build_hierarchical_pl_model(frame: TrainingFrame) -> pm.Model:
         sigma_gamma = pm.HalfNormal("sigma_gamma", 0.5)
 
         beta_sire = pm.Normal("beta_sire", 0.0, sigma_beta, dims="sire")
-        mu_horse = beta_sire[horse_to_sire]
+        mu_horse = beta_sire[mats["horse_to_sire"]]
         theta = pm.Normal("theta", mu=mu_horse, sigma=sigma_theta, dims="horse")
         alpha_jockey = pm.Normal("alpha_jockey", 0.0, sigma_alpha, dims="jockey")
         gamma_track_dist = pm.Normal(
             "gamma_track_dist", 0.0, sigma_gamma, dims="track_dist",
         )
+
+        score = (
+            theta[mats["horse_idx_mat"]]
+            + alpha_jockey[mats["jockey_idx_mat"]]
+            + gamma_track_dist[mats["track_dist_arr"]][:, None]
+        )
         pm.Potential(
             "plackett_luce_hier",
-            _plackett_luce_loglik_with_offsets(
-                theta, alpha_jockey, gamma_track_dist,
-                orderings, frame.jockey_of_horse_in_race, track_dist_per_race,
-            ),
+            _vectorized_pl_loglik(score, mats["valid_mask"]),
         )
     return model
+
+
+def build_hierarchical_pl_model_with_agf(frame: TrainingFrame) -> pm.Model:
+    n_horses = len(frame.horse_index)
+    n_jockeys = len(frame.jockey_index)
+    n_sires = len(frame.sire_index)
+    n_track_dist = len(frame.track_dist_index)
+    mats = matrices_for_pymc(frame)
+
+    coords = {
+        "horse": list(range(n_horses)),
+        "jockey": list(range(n_jockeys)),
+        "sire": list(range(n_sires)),
+        "track_dist": list(range(n_track_dist)),
+    }
+    with pm.Model(coords=coords) as model:
+        sigma_theta = pm.HalfNormal("sigma_theta", 1.0)
+        sigma_alpha = pm.HalfNormal("sigma_alpha", 0.5)
+        sigma_beta = pm.HalfNormal("sigma_beta", 0.5)
+        sigma_gamma = pm.HalfNormal("sigma_gamma", 0.5)
+
+        beta_sire = pm.Normal("beta_sire", 0.0, sigma_beta, dims="sire")
+        mu_horse = beta_sire[mats["horse_to_sire"]]
+        theta = pm.Normal("theta", mu=mu_horse, sigma=sigma_theta, dims="horse")
+        alpha_jockey = pm.Normal("alpha_jockey", 0.0, sigma_alpha, dims="jockey")
+        gamma_track_dist = pm.Normal(
+            "gamma_track_dist", 0.0, sigma_gamma, dims="track_dist",
+        )
+        delta_agf = pm.Normal("delta_agf", 0.0, 1.0)
+
+        score = (
+            theta[mats["horse_idx_mat"]]
+            + alpha_jockey[mats["jockey_idx_mat"]]
+            + gamma_track_dist[mats["track_dist_arr"]][:, None]
+            + delta_agf * mats["agf_z_mat"]
+        )
+        pm.Potential(
+            "plackett_luce_agf",
+            _vectorized_pl_loglik(score, mats["valid_mask"]),
+        )
+    return model
+
+
+def fit_advi(model: pm.Model, n_iter: int = 30_000, seed: int = 0):
+    with model:
+        approx = pm.fit(n_iter, method="advi", random_seed=seed, progressbar=False)
+        idata = approx.sample(draws=2_000, random_seed=seed)
+    return idata

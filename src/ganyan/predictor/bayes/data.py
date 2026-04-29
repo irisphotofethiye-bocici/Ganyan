@@ -38,6 +38,76 @@ class TrainingFrame:
     agf_of_horse_in_race: List[float] = field(default_factory=list)
 
 
+def matrices_for_pymc(frame: TrainingFrame):
+    """Build padded matrices for vectorized PL loglik.
+
+    Returns a dict with:
+      horse_idx_mat:   (R, K_max) int  — horse indices, 0 padded
+      jockey_idx_mat:  (R, K_max) int  — jockey indices, 0 padded
+      track_dist_arr:  (R,)       int
+      agf_z_mat:       (R, K_max) float — within-race z-score, 0 padded
+      valid_mask:      (R, K_max) bool
+      horse_to_sire:   (n_horses,) int
+    """
+    import numpy as np
+
+    race_ids = list(frame.orderings.keys())
+    R = len(race_ids)
+    K_max = max(len(frame.orderings[rid]) for rid in race_ids) if R else 0
+    n_horses = len(frame.horse_index)
+
+    horse_idx_mat = np.zeros((R, K_max), dtype="int64")
+    jockey_idx_mat = np.zeros((R, K_max), dtype="int64")
+    valid_mask = np.zeros((R, K_max), dtype="bool")
+    agf_z_mat = np.zeros((R, K_max), dtype="float64")
+    track_dist_arr = np.zeros(R, dtype="int64")
+
+    has_jockey = len(frame.jockey_of_horse_in_race) > 0
+    has_agf = len(frame.agf_of_horse_in_race) > 0
+    has_track_dist = len(frame.track_dist_of_race) > 0
+
+    flat_idx = 0
+    for r, rid in enumerate(race_ids):
+        order = frame.orderings[rid]
+        n = len(order)
+        horse_idx_mat[r, :n] = order
+        if has_jockey:
+            jockey_idx_mat[r, :n] = frame.jockey_of_horse_in_race[
+                flat_idx : flat_idx + n
+            ]
+        if has_track_dist:
+            track_dist_arr[r] = frame.track_dist_of_race[rid]
+        if has_agf:
+            agf_slice = np.asarray(
+                frame.agf_of_horse_in_race[flat_idx : flat_idx + n],
+                dtype="float64",
+            )
+            if agf_slice.std() > 1e-9:
+                agf_z = (agf_slice - agf_slice.mean()) / agf_slice.std()
+            else:
+                agf_z = np.zeros_like(agf_slice)
+            agf_z_mat[r, :n] = agf_z
+        valid_mask[r, :n] = True
+        flat_idx += n
+
+    horse_to_sire = np.zeros(n_horses, dtype="int64")
+    seen: set[int] = set()
+    flat_horses = [h for order in frame.orderings.values() for h in order]
+    for h, s in zip(flat_horses, frame.sire_of_horse_in_race):
+        if h not in seen:
+            horse_to_sire[h] = s
+            seen.add(h)
+
+    return {
+        "horse_idx_mat": horse_idx_mat,
+        "jockey_idx_mat": jockey_idx_mat,
+        "track_dist_arr": track_dist_arr,
+        "agf_z_mat": agf_z_mat,
+        "valid_mask": valid_mask,
+        "horse_to_sire": horse_to_sire,
+    }
+
+
 def _intern(idx: Dict, key) -> int:
     if key not in idx:
         idx[key] = len(idx)
