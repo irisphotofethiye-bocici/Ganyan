@@ -57,4 +57,6 @@ horse_racing.egg-info/
 htmlcov/
 .pytest_cache/
 .env
-local_settings.py models/bayes_pl_*
+local_settings.py
+models/bayes_pl_*
+
