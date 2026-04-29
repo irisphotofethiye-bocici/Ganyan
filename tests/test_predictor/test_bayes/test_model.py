@@ -39,3 +39,25 @@ def test_simple_pl_recovers_top_horse(synthetic_frame):
     assert int(np.argmax(posterior_skill_mean)) == 0
     assert posterior_skill_mean[0] > posterior_skill_mean[1]
     assert posterior_skill_mean[1] > posterior_skill_mean[3]
+
+
+def test_hierarchical_model_compiles(synthetic_frame):
+    """Smoke test — hierarchical model compiles and ADVI runs."""
+    frame = synthetic_frame
+    flat = [h for order in frame.orderings.values() for h in order]
+    frame.jockey_index = {f"j{i}": i for i in range(3)}
+    frame.track_dist_index = {(0, 0): 0, (0, 1): 1}
+    frame.sire_index = {"": 0, "sireA": 1, "sireB": 2}
+    frame.jockey_of_horse_in_race = [i % 3 for i in range(len(flat))]
+    frame.sire_of_horse_in_race = [(h % 3) for h in flat]
+    for rid in frame.orderings:
+        frame.track_dist_of_race[rid] = rid % 2
+
+    from ganyan.predictor.bayes.model import build_hierarchical_pl_model
+
+    model = build_hierarchical_pl_model(frame)
+    idata = fit_advi(model, n_iter=3_000, seed=0)
+    assert "theta" in idata.posterior
+    assert "alpha_jockey" in idata.posterior
+    assert "gamma_track_dist" in idata.posterior
+    assert "beta_sire" in idata.posterior
