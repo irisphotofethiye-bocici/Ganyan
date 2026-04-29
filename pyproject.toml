@@ -27,6 +27,10 @@ dev = [
     "respx>=0.21",
     "factory-boy>=3.3",
 ]
+bayes = [
+    "pymc>=5.10",
+    "arviz>=0.18,<1.0",
+]
 
 [project.scripts]
 ganyan = "ganyan.cli.main:app"
