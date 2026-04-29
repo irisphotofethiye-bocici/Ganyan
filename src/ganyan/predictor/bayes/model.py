@@ -11,23 +11,34 @@ from ganyan.predictor.bayes.data import TrainingFrame, matrices_for_pymc
 def _vectorized_pl_loglik(score_matrix, valid_mask):
     """Plackett-Luce loglik on a padded (R, K_max) score matrix.
 
-    For ordering positions k = 0..K-1 in race r:
-        loglik_r = Σ_k (score[r,k] − logsumexp_{j≥k} score[r,j])
+    For valid ordering positions k = 0..K-1 in race r:
+        loglik_r = Σ_k (score[r,k] − logsumexp_{j≥k, j valid} score[r,j])
 
-    Padding is masked out: pad positions get safe_score = −1e9 so they
-    contribute 0 to the tail sums and to the per-position loglik.
+    Strategy:
+      - For numerical stability, subtract row-wise max of *valid* scores.
+      - Build exp_shifted with 0 at pad positions (so they don't contribute
+        to the tail sum).
+      - Reverse-cumsum gives tail sum exp; clip to a tiny positive floor
+        before log to keep gradients finite at pad positions (those
+        positions are then masked out of the final sum).
     """
-    safe_score = pt.where(valid_mask, score_matrix, -1e9)
-    score_max = safe_score.max(axis=1, keepdims=True)
-    shifted = safe_score - score_max
-    exp_shifted = pt.exp(shifted)
+    valid_f = pt.cast(valid_mask, "float64")
+    # Row-wise max over valid entries only — safe to use a very negative
+    # placeholder for pad because those positions are then zeroed below.
+    masked_for_max = pt.where(valid_mask, score_matrix, -1e9)
+    score_max = masked_for_max.max(axis=1, keepdims=True)
+    shifted = score_matrix - score_max
+    # Zero out pad positions in exp space so tail sum ignores them.
+    exp_shifted = pt.exp(shifted) * valid_f
     rev = exp_shifted[:, ::-1]
     cum_rev = pt.cumsum(rev, axis=1)
     cum = cum_rev[:, ::-1]
-    log_tail_sum = pt.log(cum) + score_max
-    pos_loglik = safe_score - log_tail_sum
-    pos_loglik_valid = pt.where(valid_mask, pos_loglik, 0.0)
-    return pos_loglik_valid.sum()
+    # Floor the cumsum so log is finite even at trailing pad positions
+    # (those positions are masked out of the final sum anyway).
+    cum_safe = pt.maximum(cum, 1e-30)
+    log_tail_sum = pt.log(cum_safe) + score_max
+    pos_loglik = score_matrix - log_tail_sum
+    return (pos_loglik * valid_f).sum()
 
 
 def build_simple_pl_model(frame: TrainingFrame) -> pm.Model:
