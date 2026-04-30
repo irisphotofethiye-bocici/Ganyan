@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ganyan.db.models import Race
+from ganyan.scraper.parser import parse_last_six
 
 
 DISTANCE_BUCKETS: Tuple[int, ...] = (1300, 1600, 1900, 2400)
@@ -36,6 +37,23 @@ class TrainingFrame:
     sire_of_horse_in_race: List[int] = field(default_factory=list)
     track_dist_of_race: Dict[int, int] = field(default_factory=dict)
     agf_of_horse_in_race: List[float] = field(default_factory=list)
+    kgs_of_horse_in_race: List[float] = field(default_factory=list)
+    s20_of_horse_in_race: List[float] = field(default_factory=list)
+    last6_of_horse_in_race: List[float] = field(default_factory=list)
+
+
+def summarize_last_six(s: str | None) -> float:
+    """Mean finish position over recorded races (lower=better).
+
+    Returns 0.0 when no data — caller z-scores within race so 0.0 acts
+    as the within-race mean (no-op contribution to the PL score).
+    """
+    if not s:
+        return 0.0
+    parsed = [p for p in parse_last_six(s) if p is not None]
+    if not parsed:
+        return 0.0
+    return float(sum(parsed)) / len(parsed)
 
 
 def matrices_for_pymc(frame: TrainingFrame):
@@ -60,11 +78,23 @@ def matrices_for_pymc(frame: TrainingFrame):
     jockey_idx_mat = np.zeros((R, K_max), dtype="int64")
     valid_mask = np.zeros((R, K_max), dtype="bool")
     agf_z_mat = np.zeros((R, K_max), dtype="float64")
+    kgs_z_mat = np.zeros((R, K_max), dtype="float64")
+    s20_z_mat = np.zeros((R, K_max), dtype="float64")
+    last6_z_mat = np.zeros((R, K_max), dtype="float64")
     track_dist_arr = np.zeros(R, dtype="int64")
 
     has_jockey = len(frame.jockey_of_horse_in_race) > 0
     has_agf = len(frame.agf_of_horse_in_race) > 0
     has_track_dist = len(frame.track_dist_of_race) > 0
+    has_kgs = len(frame.kgs_of_horse_in_race) > 0
+    has_s20 = len(frame.s20_of_horse_in_race) > 0
+    has_last6 = len(frame.last6_of_horse_in_race) > 0
+
+    def _zscore(slice_arr: np.ndarray) -> np.ndarray:
+        std = slice_arr.std()
+        if std > 1e-9:
+            return (slice_arr - slice_arr.mean()) / std
+        return np.zeros_like(slice_arr)
 
     flat_idx = 0
     for r, rid in enumerate(race_ids):
@@ -78,15 +108,25 @@ def matrices_for_pymc(frame: TrainingFrame):
         if has_track_dist:
             track_dist_arr[r] = frame.track_dist_of_race[rid]
         if has_agf:
-            agf_slice = np.asarray(
+            agf_z_mat[r, :n] = _zscore(np.asarray(
                 frame.agf_of_horse_in_race[flat_idx : flat_idx + n],
                 dtype="float64",
-            )
-            if agf_slice.std() > 1e-9:
-                agf_z = (agf_slice - agf_slice.mean()) / agf_slice.std()
-            else:
-                agf_z = np.zeros_like(agf_slice)
-            agf_z_mat[r, :n] = agf_z
+            ))
+        if has_kgs:
+            kgs_z_mat[r, :n] = _zscore(np.asarray(
+                frame.kgs_of_horse_in_race[flat_idx : flat_idx + n],
+                dtype="float64",
+            ))
+        if has_s20:
+            s20_z_mat[r, :n] = _zscore(np.asarray(
+                frame.s20_of_horse_in_race[flat_idx : flat_idx + n],
+                dtype="float64",
+            ))
+        if has_last6:
+            last6_z_mat[r, :n] = _zscore(np.asarray(
+                frame.last6_of_horse_in_race[flat_idx : flat_idx + n],
+                dtype="float64",
+            ))
         valid_mask[r, :n] = True
         flat_idx += n
 
@@ -103,6 +143,9 @@ def matrices_for_pymc(frame: TrainingFrame):
         "jockey_idx_mat": jockey_idx_mat,
         "track_dist_arr": track_dist_arr,
         "agf_z_mat": agf_z_mat,
+        "kgs_z_mat": kgs_z_mat,
+        "s20_z_mat": s20_z_mat,
+        "last6_z_mat": last6_z_mat,
         "valid_mask": valid_mask,
         "horse_to_sire": horse_to_sire,
     }
@@ -142,17 +185,26 @@ def build_training_frame(
         jockey_ids: List[int] = []
         sire_ids: List[int] = []
         agfs: List[float] = []
+        kgss: List[float] = []
+        s20s: List[float] = []
+        last6s: List[float] = []
         for e in finishers:
             horse_ids.append(_intern(frame.horse_index, e.horse_id))
             jockey_ids.append(_intern(frame.jockey_index, e.jockey))
             sire_name = (e.horse.sire or "") if e.horse else ""
             sire_ids.append(_intern(frame.sire_index, sire_name))
             agfs.append(float(e.agf) if e.agf is not None else 0.0)
+            kgss.append(float(e.kgs) if e.kgs is not None else 0.0)
+            s20s.append(float(e.s20) if e.s20 is not None else 0.0)
+            last6s.append(summarize_last_six(e.last_six))
         track_dist = (r.track_id, distance_bucket_for(r.distance_meters or 0))
         frame.track_dist_of_race[r.id] = _intern(frame.track_dist_index, track_dist)
         frame.orderings[r.id] = horse_ids
         frame.jockey_of_horse_in_race.extend(jockey_ids)
         frame.sire_of_horse_in_race.extend(sire_ids)
         frame.agf_of_horse_in_race.extend(agfs)
+        frame.kgs_of_horse_in_race.extend(kgss)
+        frame.s20_of_horse_in_race.extend(s20s)
+        frame.last6_of_horse_in_race.extend(last6s)
 
     return frame

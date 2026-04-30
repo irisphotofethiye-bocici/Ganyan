@@ -7,7 +7,9 @@ from typing import List, Sequence
 import numpy as np
 import arviz as az
 
-from ganyan.predictor.bayes.data import TrainingFrame, distance_bucket_for
+from ganyan.predictor.bayes.data import (
+    TrainingFrame, distance_bucket_for, summarize_last_six,
+)
 
 
 @dataclass
@@ -20,6 +22,13 @@ class BayesPrediction:
     mean_score: float
 
 
+def _zscore(x: np.ndarray) -> np.ndarray:
+    std = x.std()
+    if std > 1e-9:
+        return (x - x.mean()) / std
+    return np.zeros_like(x)
+
+
 def predict_from_posterior(
     idata: az.InferenceData,
     frame: TrainingFrame,
@@ -27,9 +36,10 @@ def predict_from_posterior(
 ) -> List[BayesPrediction]:
     """Posterior over win probability for one race.
 
-    `race` keys:
+    `race` keys (required):
       horse_ids, jockeys, sires, track_id, distance_meters, agfs
-      (optional) horse_names
+    `race` keys (optional, used only if posterior has the matching coef):
+      kgss, s20s, last_sixes (str list), horse_names
     """
     post = idata.posterior
     theta = post["theta"].stack(sample=("chain", "draw")).values
@@ -38,6 +48,15 @@ def predict_from_posterior(
     gamma = post["gamma_track_dist"].stack(sample=("chain", "draw")).values
     delta = post["delta_agf"].stack(sample=("chain", "draw")).values
     sigma_theta = post["sigma_theta"].stack(sample=("chain", "draw")).values
+
+    def _opt_coef(name: str) -> np.ndarray | None:
+        if name in post.data_vars:
+            return post[name].stack(sample=("chain", "draw")).values
+        return None
+
+    delta_kgs = _opt_coef("delta_kgs")
+    delta_s20 = _opt_coef("delta_s20")
+    delta_last6 = _opt_coef("delta_last6")
 
     S = delta.shape[0]
     n = len(race["horse_ids"])
@@ -71,11 +90,23 @@ def predict_from_posterior(
             score[k] += gamma[td_idx, :]
 
     agfs = np.asarray(race["agfs"], dtype=float)
-    if agfs.std() > 1e-9:
-        agf_z = (agfs - agfs.mean()) / agfs.std()
-    else:
-        agf_z = np.zeros_like(agfs)
-    score += np.outer(agf_z, delta)
+    score += np.outer(_zscore(agfs), delta)
+
+    if delta_kgs is not None and "kgss" in race:
+        kgs_arr = np.asarray(
+            [k if k is not None else 0.0 for k in race["kgss"]], dtype=float,
+        )
+        score += np.outer(_zscore(kgs_arr), delta_kgs)
+    if delta_s20 is not None and "s20s" in race:
+        s20_arr = np.asarray(
+            [s if s is not None else 0.0 for s in race["s20s"]], dtype=float,
+        )
+        score += np.outer(_zscore(s20_arr), delta_s20)
+    if delta_last6 is not None and "last_sixes" in race:
+        last6_arr = np.asarray(
+            [summarize_last_six(s) for s in race["last_sixes"]], dtype=float,
+        )
+        score += np.outer(_zscore(last6_arr), delta_last6)
 
     score -= score.max(axis=0, keepdims=True)
     exps = np.exp(score)

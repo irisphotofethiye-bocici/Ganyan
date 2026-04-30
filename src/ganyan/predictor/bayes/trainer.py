@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from ganyan.predictor.bayes.data import TrainingFrame, build_training_frame
 from ganyan.predictor.bayes.model import (
-    build_hierarchical_pl_model_with_agf, fit_advi,
+    build_full_hierarchical_pl_model, fit_advi,
 )
 
 
@@ -54,6 +54,6 @@ def train_full(
     seed: int = 0,
 ) -> None:
     frame = build_training_frame(session, from_date, to_date)
-    model = build_hierarchical_pl_model_with_agf(frame)
+    model = build_full_hierarchical_pl_model(frame)
     idata = fit_advi(model, n_iter=n_iter, seed=seed)
     save_posterior(idata, frame, output_base)

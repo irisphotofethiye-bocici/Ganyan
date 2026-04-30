@@ -1974,6 +1974,20 @@ def advice_cmd(
         "models/bayes_pl_v1", "--bayes-posterior",
         help="Path base (no suffix) to .nc/.indices.json posterior files.",
     ),
+    trip_wire: bool = typer.Option(
+        True, "--trip-wire/--no-trip-wire",
+        help="Halt advice when today's avg top-1 prob deviates >sigma from "
+             "90-day baseline. Catches silent feature-pipeline regressions "
+             "(2026-04-19 cliff-style). Default ON.",
+    ),
+    trip_wire_sigma: float = typer.Option(
+        2.0, "--trip-wire-sigma",
+        help="Z-score threshold for trip-wire halt.",
+    ),
+    trip_wire_lookback: int = typer.Option(
+        90, "--trip-wire-lookback",
+        help="Days of history for the trip-wire baseline.",
+    ),
     json_output: bool = typer.Option(False, "--json", help="JSON output."),
 ) -> None:
     """Günün bahis tavsiyeleri — scheduler'ın ürettiği picks'i "bugün ne
@@ -2060,6 +2074,13 @@ def advice_cmd(
             "agfs": [
                 float(e.agf) if e.agf is not None else 0.0 for e in entries
             ],
+            "kgss": [
+                float(e.kgs) if e.kgs is not None else 0.0 for e in entries
+            ],
+            "s20s": [
+                float(e.s20) if e.s20 is not None else 0.0 for e in entries
+            ],
+            "last_sixes": [e.last_six or "" for e in entries],
         }
         try:
             preds = predict_from_posterior(bayes_idata, bayes_frame, race_in)
@@ -2081,6 +2102,55 @@ def advice_cmd(
                 f"{bayes_min_lo5:.0%}"
             )
         return None
+
+    def _trip_wire_check(session) -> dict | None:
+        """Return today vs 90d-baseline stats for top-1 model_prob.
+
+        None if insufficient baseline (<30 days with data) or no races today.
+        """
+        from datetime import timedelta
+        from sqlalchemy import func, select
+        from ganyan.db.models import RaceEntry
+        import numpy as np
+
+        since = target_date - timedelta(days=trip_wire_lookback + 1)
+        per_race_top1 = (
+            select(
+                Race.date.label("d"),
+                Race.id.label("rid"),
+                func.max(RaceEntry.predicted_probability).label("top1"),
+            )
+            .join(RaceEntry, RaceEntry.race_id == Race.id)
+            .where(Race.date >= since, Race.date <= target_date)
+            .where(RaceEntry.predicted_probability.is_not(None))
+            .group_by(Race.id, Race.date)
+            .subquery()
+        )
+        rows = session.execute(
+            select(
+                per_race_top1.c.d, func.avg(per_race_top1.c.top1).label("daily_avg"),
+            )
+            .group_by(per_race_top1.c.d)
+            .order_by(per_race_top1.c.d)
+        ).all()
+        daily = {row.d: float(row.daily_avg) for row in rows}
+        today_avg = daily.pop(target_date, None)
+        if today_avg is None:
+            return None
+        if len(daily) < 30:
+            return None
+        arr = np.fromiter(daily.values(), dtype="float64")
+        baseline_mean = float(arr.mean())
+        baseline_std = float(arr.std())
+        if baseline_std < 1e-9:
+            return None
+        return {
+            "today_avg": today_avg,
+            "baseline_mean": baseline_mean,
+            "baseline_std": baseline_std,
+            "z_score": (today_avg - baseline_mean) / baseline_std,
+            "n_baseline_days": len(daily),
+        }
 
     session = get_session()
     try:
@@ -2104,6 +2174,20 @@ def advice_cmd(
             else:
                 typer.echo(f"  → uv run ganyan scrape --backfill --rescrape "
                            f"--from {target_date} --to {target_date}")
+            return
+
+        trip_info = _trip_wire_check(session) if trip_wire else None
+        if trip_info is not None and abs(trip_info["z_score"]) > trip_wire_sigma:
+            direction = "OVER-confident" if trip_info["z_score"] > 0 else "UNDER-confident"
+            typer.echo(
+                f"⚠️  TRIP-WIRE FIRED — model is {direction} today.\n"
+                f"  today avg top-1 prob: {trip_info['today_avg']:.1f}%\n"
+                f"  {trip_info['n_baseline_days']}d baseline:    "
+                f"{trip_info['baseline_mean']:.1f}% ± {trip_info['baseline_std']:.1f}%  "
+                f"(z = {trip_info['z_score']:+.2f})\n"
+                f"  Likely silent feature-pipeline regression. HALTING advice.\n"
+                f"  → bypass with --no-trip-wire if you've verified the cause."
+            )
             return
 
         race_ids = [r.id for r in races]

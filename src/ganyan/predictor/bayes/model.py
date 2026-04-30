@@ -134,6 +134,63 @@ def build_hierarchical_pl_model_with_agf(frame: TrainingFrame) -> pm.Model:
     return model
 
 
+def build_full_hierarchical_pl_model(frame: TrainingFrame) -> pm.Model:
+    """Hierarchical PL with AGF prior + private signals (kgs, s20, last_six).
+
+    Adds three Normal(0, 1) coefficients on within-race z-scores of:
+      - kgs (days since last race; sign indeterminate, model finds it)
+      - s20 (last-20 perf score; expect positive coefficient — higher=better)
+      - last6 (mean recent finish position; expect negative — lower=better)
+
+    Cold-start safe: if a horse has no value, it enters as 0 (within-race
+    mean), so the term contributes 0 to that horse's PL score.
+    """
+    n_horses = len(frame.horse_index)
+    n_jockeys = len(frame.jockey_index)
+    n_sires = len(frame.sire_index)
+    n_track_dist = len(frame.track_dist_index)
+    mats = matrices_for_pymc(frame)
+
+    coords = {
+        "horse": list(range(n_horses)),
+        "jockey": list(range(n_jockeys)),
+        "sire": list(range(n_sires)),
+        "track_dist": list(range(n_track_dist)),
+    }
+    with pm.Model(coords=coords) as model:
+        sigma_theta = pm.HalfNormal("sigma_theta", 1.0)
+        sigma_alpha = pm.HalfNormal("sigma_alpha", 0.5)
+        sigma_beta = pm.HalfNormal("sigma_beta", 0.5)
+        sigma_gamma = pm.HalfNormal("sigma_gamma", 0.5)
+
+        beta_sire = pm.Normal("beta_sire", 0.0, sigma_beta, dims="sire")
+        mu_horse = beta_sire[mats["horse_to_sire"]]
+        theta = pm.Normal("theta", mu=mu_horse, sigma=sigma_theta, dims="horse")
+        alpha_jockey = pm.Normal("alpha_jockey", 0.0, sigma_alpha, dims="jockey")
+        gamma_track_dist = pm.Normal(
+            "gamma_track_dist", 0.0, sigma_gamma, dims="track_dist",
+        )
+        delta_agf = pm.Normal("delta_agf", 0.0, 1.0)
+        delta_kgs = pm.Normal("delta_kgs", 0.0, 1.0)
+        delta_s20 = pm.Normal("delta_s20", 0.0, 1.0)
+        delta_last6 = pm.Normal("delta_last6", 0.0, 1.0)
+
+        score = (
+            theta[mats["horse_idx_mat"]]
+            + alpha_jockey[mats["jockey_idx_mat"]]
+            + gamma_track_dist[mats["track_dist_arr"]][:, None]
+            + delta_agf * mats["agf_z_mat"]
+            + delta_kgs * mats["kgs_z_mat"]
+            + delta_s20 * mats["s20_z_mat"]
+            + delta_last6 * mats["last6_z_mat"]
+        )
+        pm.Potential(
+            "plackett_luce_full",
+            _vectorized_pl_loglik(score, mats["valid_mask"]),
+        )
+    return model
+
+
 def fit_advi(model: pm.Model, n_iter: int = 30_000, seed: int = 0):
     with model:
         approx = pm.fit(n_iter, method="advi", random_seed=seed, progressbar=False)
