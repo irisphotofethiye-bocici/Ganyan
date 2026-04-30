@@ -9,14 +9,42 @@ from flask import (
     abort,
     current_app,
     jsonify,
+    redirect,
     render_template,
     request,
+    url_for,
 )
 from sqlalchemy.orm import Session, joinedload
 
 from ganyan.db.models import Race, RaceStatus
 
 bp = Blueprint("main", __name__)
+
+# Module-level cache for the Bayes posterior. Loading the .nc file costs
+# ~0.5-1s and parses ~100MB of arviz state — caching across requests keeps
+# /advice responsive. Keyed by absolute path so swapping --bayes-posterior
+# works without a process restart.
+_BAYES_CACHE: dict[str, tuple[object, object]] = {}
+
+
+def _load_bayes_cached(base_path):
+    from pathlib import Path
+
+    key = str(Path(base_path).resolve())
+    cached = _BAYES_CACHE.get(key)
+    if cached is not None:
+        return cached
+    nc = Path(base_path).with_suffix(".nc")
+    idx = Path(base_path).with_suffix(".indices.json")
+    if not (nc.exists() and idx.exists()):
+        return None
+    from ganyan.predictor.bayes.trainer import load_posterior
+    try:
+        loaded = load_posterior(Path(base_path))
+    except Exception:  # noqa: BLE001
+        return None
+    _BAYES_CACHE[key] = loaded
+    return loaded
 
 
 @bp.app_context_processor
@@ -786,12 +814,11 @@ def scrape_results():
         raw_results = asyncio.run(_do_scrape())
 
         if not raw_results:
-            msg = "Bugün için sonuç bulunamadı."
             if _wants_json():
-                return jsonify({"message": msg, "count": 0})
-            return render_template(
-                "index.html", today_races=[], recent_races=[], message=msg,
-            )
+                return jsonify(
+                    {"message": "Bugün için sonuç bulunamadı.", "count": 0},
+                )
+            return redirect(url_for("main.index"))
 
         updated = 0
         for raw in raw_results:
@@ -801,38 +828,21 @@ def scrape_results():
                 updated += 1
         session.commit()
 
-        msg = f"{updated} yarış sonucu güncellendi."
         if _wants_json():
-            return jsonify({"message": msg, "count": updated})
-
-        today_races = (
-            session.query(Race)
-            .filter(Race.date == date.today())
-            .order_by(Race.race_number)
-            .all()
-        )
-        recent_races = (
-            session.query(Race)
-            .filter(Race.status == RaceStatus.resulted)
-            .order_by(Race.date.desc(), Race.race_number.desc())
-            .limit(10)
-            .all()
-        )
-        return render_template(
-            "index.html",
-            today_races=today_races,
-            recent_races=recent_races,
-            message=msg,
-        )
+            return jsonify(
+                {
+                    "message": f"{updated} yarış sonucu güncellendi.",
+                    "count": updated,
+                },
+            )
+        return redirect(url_for("main.index"))
 
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         msg = f"Hata: {exc}"
         if _wants_json():
             return jsonify({"error": msg}), 500
-        return render_template(
-            "index.html", today_races=[], recent_races=[], message=msg,
-        ), 500
+        return redirect(url_for("main.index")), 302
     finally:
         session.close()
 
@@ -1271,6 +1281,15 @@ def advice_dashboard():
     date_str = request.args.get("date")
     bankroll = float(request.args.get("bankroll", 10000))
     kelly_mult = float(request.args.get("kelly", 0.25))
+    # Default ON. ?cohort_filter=0 to disable.
+    cohort_filter = request.args.get("cohort_filter", "1") not in ("0", "false", "")
+    # Bayes skip-gate (mirrors `ganyan advice` CLI). Default ON.
+    bayes_skip = request.args.get("bayes_skip", "1") not in ("0", "false", "")
+    bayes_min_prob = float(request.args.get("bayes_min_prob", 0.35))
+    bayes_min_lo5 = float(request.args.get("bayes_min_lo5", 0.20))
+    bayes_posterior_path = request.args.get(
+        "bayes_posterior", "models/bayes_pl_v3",
+    )
     try:
         target_date = (
             _dt.strptime(date_str, "%Y-%m-%d").date() if date_str else date.today()
@@ -1278,7 +1297,123 @@ def advice_dashboard():
     except ValueError:
         target_date = date.today()
 
+    def _cohort_skip_reason(race) -> str | None:
+        rt = (race.race_type or "")
+        if "Maiden /Dişi" in rt or "Maiden Dişi" in rt:
+            return "Maiden /Dişi (-46% ROI)"
+        if len(race.entries) >= 13:
+            return f"field {len(race.entries)}≥13 (-22% ROI)"
+        track_name = race.track.name if race.track else ""
+        if track_name in {"Şanlıurfa", "Bursa"}:
+            return f"track {track_name}"
+        return None
+
     session = _get_session()
+
+    # Lazy-load Bayes posterior + per-horse history (speed/workout/pace).
+    # All three histories are session-scoped (one query each) and reused
+    # across every race in this request.
+    bayes_loaded = None
+    bayes_speed_history = None
+    bayes_workout_history = None
+    bayes_pace_history = None
+    bayes_load_error = None
+    if bayes_skip:
+        bayes_loaded = _load_bayes_cached(bayes_posterior_path)
+        if bayes_loaded is None:
+            bayes_load_error = (
+                f"posterior not found at {bayes_posterior_path}.nc / "
+                f".indices.json — train via `uv run python logs/bayes_train.py`"
+            )
+        else:
+            try:
+                from ganyan.predictor.speed_figures import (
+                    build_horse_speed_history, compute_track_variants,
+                )
+                from ganyan.predictor.workouts import build_horse_workout_history
+                from ganyan.predictor.pace import (
+                    build_horse_pace_history, compute_pace_baseline,
+                )
+                variants = compute_track_variants(session, to_date=target_date)
+                bayes_speed_history = build_horse_speed_history(
+                    session, variants, to_date=target_date,
+                )
+                bayes_workout_history = build_horse_workout_history(
+                    session, to_date=target_date,
+                )
+                pace_baseline = compute_pace_baseline(session, to_date=target_date)
+                bayes_pace_history = build_horse_pace_history(
+                    session, pace_baseline, to_date=target_date,
+                )
+            except Exception as e:  # noqa: BLE001
+                bayes_load_error = f"history build failed: {e}"
+                bayes_loaded = None
+
+    def _bayes_top_pred(race):
+        if bayes_loaded is None:
+            return None
+        from ganyan.predictor.bayes.predictor import predict_from_posterior
+        from ganyan.predictor.speed_figures import horse_speed_score
+        from ganyan.predictor.workouts import horse_workout_score
+        from ganyan.predictor.pace import horse_pace_score
+        entries = list(race.entries)
+        if len(entries) < 3:
+            return None
+        race_in = {
+            "horse_ids": [e.horse_id for e in entries],
+            "horse_names": [
+                e.horse.name if e.horse else "?" for e in entries
+            ],
+            "jockeys": [e.jockey or "" for e in entries],
+            "sires": [
+                (e.horse.sire or "") if e.horse else "" for e in entries
+            ],
+            "track_id": race.track_id,
+            "distance_meters": race.distance_meters or 0,
+            "agfs": [
+                float(e.agf) if e.agf is not None else 0.0 for e in entries
+            ],
+            "kgss": [
+                float(e.kgs) if e.kgs is not None else 0.0 for e in entries
+            ],
+            "s20s": [
+                float(e.s20) if e.s20 is not None else 0.0 for e in entries
+            ],
+            "last_sixes": [e.last_six or "" for e in entries],
+            "speeds": [
+                horse_speed_score(bayes_speed_history, e.horse_id, race.date) or 0.0
+                for e in entries
+            ],
+            "workouts": [
+                horse_workout_score(bayes_workout_history, e.horse_id, race.date) or 0.0
+                for e in entries
+            ],
+            "paces": [
+                horse_pace_score(bayes_pace_history, e.horse_id, race.date) or 0.0
+                for e in entries
+            ],
+        }
+        idata, frame = bayes_loaded
+        try:
+            preds = predict_from_posterior(idata, frame, race_in)
+        except Exception:  # noqa: BLE001
+            return None
+        return preds[0] if preds else None
+
+    def _bayes_skip_reason(top) -> str | None:
+        if top is None:
+            return None
+        if top.mean_prob < bayes_min_prob:
+            return (
+                f"Bayes top-1 mean {top.mean_prob:.0%}<"
+                f"{bayes_min_prob:.0%}"
+            )
+        if top.lo_5 < bayes_min_lo5:
+            return (
+                f"Bayes top-1 lo₅ {top.lo_5:.0%}<{bayes_min_lo5:.0%}"
+            )
+        return None
+
     try:
         edge_stats = strategy_edge_stats(
             session,
@@ -1394,10 +1529,24 @@ def advice_dashboard():
                 "sirali_top": si_ranked,
             }
 
+        # Bayes top-1 (with 90% CI) per race. Pre-computed once so the
+        # per-race loop below can trigger the gate decision and the kelly
+        # multiplier without re-running ADVI per race.
+        bayes_top_by_race: dict[int, object] = {}
+        if bayes_loaded is not None:
+            for r in races:
+                top = _bayes_top_pred(r)
+                if top is not None:
+                    bayes_top_by_race[r.id] = top
+
         # Build view model — per-race card with pick rows enriched with
         # Kelly suggestion + outcome flags.
         races_with_picks = []
+        skipped_cohort_races: list[dict] = []
+        skipped_bayes_races: list[dict] = []
         n_advised = n_with_hit = n_no_pool = 0
+        n_skipped_cohort = 0
+        n_skipped_bayes = 0
         gross_stake = effective_stake = total_payout = 0.0
         any_graded = False
 
@@ -1405,6 +1554,49 @@ def advice_dashboard():
             rpicks = picks_by_race.get(r.id)
             if not rpicks:
                 continue
+            if cohort_filter:
+                reason = _cohort_skip_reason(r)
+                if reason:
+                    skipped_cohort_races.append({
+                        "track": r.track.name if r.track else "?",
+                        "race_number": r.race_number,
+                        "post_time": r.post_time,
+                        "reason": reason,
+                    })
+                    n_skipped_cohort += 1
+                    continue
+            bayes_top = bayes_top_by_race.get(r.id)
+            if bayes_skip:
+                br = _bayes_skip_reason(bayes_top)
+                if br:
+                    skipped_bayes_races.append({
+                        "track": r.track.name if r.track else "?",
+                        "race_number": r.race_number,
+                        "post_time": r.post_time,
+                        "reason": br,
+                        "bayes_top1_horse": (
+                            bayes_top.horse_name if bayes_top else None
+                        ),
+                        "bayes_top1_mean": (
+                            bayes_top.mean_prob if bayes_top else None
+                        ),
+                        "bayes_top1_lo5": (
+                            bayes_top.lo_5 if bayes_top else None
+                        ),
+                        "bayes_top1_hi95": (
+                            bayes_top.hi_95 if bayes_top else None
+                        ),
+                    })
+                    n_skipped_bayes += 1
+                    continue
+            kelly_mult_eff = kelly_mult
+            bayes_conf = None
+            if bayes_top is not None:
+                bayes_conf = max(
+                    0.0, min(1.0, (bayes_top.mean_prob - 0.35) / 0.15),
+                )
+                kelly_mult_eff = kelly_mult * (0.5 + 0.5 * bayes_conf)
+
             race_had_hit = False
             pick_rows = []
             rpicks.sort(key=lambda p: STRATEGY_ORDER.get(p.strategy, 99))
@@ -1422,7 +1614,7 @@ def advice_dashboard():
                         b=stats.avg_b,
                         bankroll_tl=bankroll,
                         base_stake_tl=stake,
-                        kelly_multiplier=kelly_mult,
+                        kelly_multiplier=kelly_mult_eff,
                     )
 
                 is_miss = p.graded and not p.hit
@@ -1462,6 +1654,9 @@ def advice_dashboard():
                 "picks": pick_rows,
                 "winner_name": winner_name_by_race.get(r.id),
                 "harville": harville_by_race.get(r.id),
+                "bayes_top": bayes_top,
+                "bayes_conf": bayes_conf,
+                "kelly_mult_eff": kelly_mult_eff,
             })
             n_advised += 1
             if race_had_hit:
@@ -1483,6 +1678,15 @@ def advice_dashboard():
             "gross_stake": gross_stake,
             "effective_stake": effective_stake,
             "n_no_pool": n_no_pool,
+            "n_skipped_cohort": n_skipped_cohort,
+            "n_skipped_bayes": n_skipped_bayes,
+            "cohort_filter_on": cohort_filter,
+            "bayes_skip_on": bayes_skip,
+            "bayes_loaded": bayes_loaded is not None,
+            "bayes_load_error": bayes_load_error,
+            "bayes_min_prob": bayes_min_prob,
+            "bayes_min_lo5": bayes_min_lo5,
+            "bayes_posterior_path": bayes_posterior_path,
             "graded": any_graded,
             "payout": total_payout,
             "net": net,
@@ -1495,8 +1699,14 @@ def advice_dashboard():
                 "date": str(target_date),
                 "bankroll_tl": bankroll,
                 "kelly_multiplier": kelly_mult,
+                "cohort_filter_on": cohort_filter,
+                "bayes_skip_on": bayes_skip,
+                "bayes_min_prob": bayes_min_prob,
+                "bayes_min_lo5": bayes_min_lo5,
                 "summary": summary,
                 "edge_stats": edge_display,
+                "skipped_cohort_races": skipped_cohort_races,
+                "skipped_bayes_races": skipped_bayes_races,
                 "races": [
                     {
                         "race_id": r["race"].id,
@@ -1510,6 +1720,20 @@ def advice_dashboard():
                         "winner_name": r["winner_name"],
                         "picks": r["picks"],
                         "harville": r["harville"],
+                        "bayes_top1_horse": (
+                            r["bayes_top"].horse_name if r["bayes_top"] else None
+                        ),
+                        "bayes_top1_mean": (
+                            r["bayes_top"].mean_prob if r["bayes_top"] else None
+                        ),
+                        "bayes_top1_lo5": (
+                            r["bayes_top"].lo_5 if r["bayes_top"] else None
+                        ),
+                        "bayes_top1_hi95": (
+                            r["bayes_top"].hi_95 if r["bayes_top"] else None
+                        ),
+                        "bayes_confidence": r["bayes_conf"],
+                        "kelly_multiplier_effective": r["kelly_mult_eff"],
                     } for r in races_with_picks
                 ],
             })
@@ -1518,6 +1742,10 @@ def advice_dashboard():
             "advice.html",
             target_date=str(target_date),
             races_with_picks=races_with_picks,
+            skipped_cohort_races=skipped_cohort_races,
+            skipped_bayes_races=skipped_bayes_races,
+            cohort_filter_on=cohort_filter,
+            bayes_skip_on=bayes_skip,
             summary=summary,
             edge_stats=edge_display,
         )

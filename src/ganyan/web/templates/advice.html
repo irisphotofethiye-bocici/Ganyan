@@ -1,34 +1,128 @@
 {% extends "base.html" %}
-{% block title %}Bet Advice — {{ target_date }}{% endblock %}
+{% block title %}Bahis Tavsiyesi — {{ target_date }}{% endblock %}
 
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h2>Bet Advice <small class="text-muted">— {{ target_date }}</small></h2>
-    <div>
-        <a href="/picks" class="btn btn-outline-secondary btn-sm">Ledger →</a>
-        <button class="btn btn-outline-primary btn-sm"
-                hx-get="/advice?date={{ target_date }}"
-                hx-target="body"
-                hx-swap="outerHTML"
-                hx-trigger="click">
-            Refresh
-        </button>
+<style>
+    .ci-bar {
+        position: relative; height: 16px;
+        background: #f1f3f5; border-radius: 3px;
+        overflow: hidden; min-width: 140px;
+    }
+    .ci-bar .ci-range {
+        position: absolute; top: 0; bottom: 0;
+        background: linear-gradient(90deg, #adb5bd, #6c757d);
+        opacity: 0.55;
+    }
+    .ci-bar .ci-mean {
+        position: absolute; top: -2px; bottom: -2px;
+        width: 2px; background: #0d6efd;
+    }
+    .ci-bar .ci-gate {
+        position: absolute; top: 0; bottom: 0;
+        width: 1px; background: #dc3545;
+        border-left: 1px dashed #dc3545;
+    }
+    .ci-label { font-variant-numeric: tabular-nums; font-size: 0.8em; }
+    .race-card { transition: box-shadow 0.15s ease; }
+    .race-card:hover { box-shadow: 0 0.25rem 0.75rem rgba(0,0,0,0.08); }
+    .race-card.bayes-pass { border-left: 4px solid #198754; }
+    .race-card.bayes-borderline { border-left: 4px solid #ffc107; }
+    .race-card.bayes-noinfo { border-left: 4px solid #dee2e6; }
+    .kelly-mult-badge {
+        font-family: 'SF Mono', 'Monaco', monospace; font-size: 0.78em;
+        background: #e7f5ff; color: #0c5476; border: 1px solid #b6e0fe;
+        padding: 1px 6px; border-radius: 3px;
+    }
+    .bayes-conf-meter {
+        display: inline-block; height: 6px; width: 60px;
+        background: #e9ecef; border-radius: 2px; vertical-align: middle;
+        overflow: hidden; margin-left: 4px;
+    }
+    .bayes-conf-fill { height: 100%; background: #198754; }
+    .summary-card { transition: transform 0.1s ease; }
+    .summary-card:hover { transform: translateY(-1px); }
+</style>
+
+<!-- Header bar -->
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h2 class="mb-0">
+        Bahis Tavsiyesi
+        <small class="text-muted">— {{ target_date }}</small>
+    </h2>
+    <div class="d-flex gap-2 align-items-center">
+        <a href="/picks" class="btn btn-outline-secondary btn-sm">Bahis Defteri →</a>
+        <a href="?date={{ target_date }}" class="btn btn-outline-primary btn-sm">
+            Yenile
+        </a>
+    </div>
+</div>
+
+<!-- Top filter strip — shows what's filtering races right now -->
+<div class="card mb-3 bg-light border-0">
+    <div class="card-body py-2 small">
+        <div class="row g-2 align-items-center">
+            <div class="col-md-auto">
+                <strong class="text-muted">Filtreler:</strong>
+            </div>
+
+            <!-- Cohort filter -->
+            <div class="col-md-auto">
+                {% if cohort_filter_on %}
+                    <span class="badge bg-warning text-dark">
+                        kohort açık · {{ summary.n_skipped_cohort }} atlandı
+                    </span>
+                    <a href="?date={{ target_date }}&amp;cohort_filter=0&amp;bayes_skip={{ '1' if bayes_skip_on else '0' }}"
+                       class="small ms-1">kapat</a>
+                {% else %}
+                    <span class="badge bg-secondary">kohort kapalı</span>
+                    <a href="?date={{ target_date }}&amp;cohort_filter=1&amp;bayes_skip={{ '1' if bayes_skip_on else '0' }}"
+                       class="small ms-1">aç</a>
+                {% endif %}
+            </div>
+
+            <!-- Bayes gate -->
+            <div class="col-md-auto">
+                {% if summary.bayes_skip_on and summary.bayes_loaded %}
+                    <span class="badge bg-primary">
+                        Bayes geçit · ort≥{{ "{:.0%}".format(summary.bayes_min_prob) }} · lo₅≥{{ "{:.0%}".format(summary.bayes_min_lo5) }} · {{ summary.n_skipped_bayes }} atlandı
+                    </span>
+                    <a href="?date={{ target_date }}&amp;cohort_filter={{ '1' if cohort_filter_on else '0' }}&amp;bayes_skip=0"
+                       class="small ms-1">kapat</a>
+                {% elif summary.bayes_skip_on and not summary.bayes_loaded %}
+                    <span class="badge bg-danger">
+                        Bayes posterior yüklenemedi
+                    </span>
+                    <span class="text-muted small ms-1">{{ summary.bayes_load_error }}</span>
+                {% else %}
+                    <span class="badge bg-secondary">Bayes geçit kapalı</span>
+                    <a href="?date={{ target_date }}&amp;cohort_filter={{ '1' if cohort_filter_on else '0' }}&amp;bayes_skip=1"
+                       class="small ms-1">aç</a>
+                {% endif %}
+            </div>
+
+            <!-- Posterior path readout -->
+            {% if summary.bayes_loaded %}
+            <div class="col-md-auto small text-muted">
+                <code>{{ summary.bayes_posterior_path }}</code>
+            </div>
+            {% endif %}
+        </div>
     </div>
 </div>
 
 <div class="small text-muted mb-3">
-    İleriye dönük bahis tavsiyeleri.  Scheduler'ın ürettiği picks'i
-    "bugün ne oynayım?" formatında gösterir.  <code>/picks</code> geçmişi
-    gösterir — burası "şimdi ne yapayım?".
-    Her bilet için Kelly-önerilen stake, stratejinin <strong>ampirik
-    hit rate</strong>'i ve ortalama kazanç çarpanı üzerinden hesaplanır
-    (quarter-Kelly, varsayılan bankroll ≈10K TL).
+    Hierarşik Bayes Plackett-Luce posterior'u <strong>geçit</strong>
+    olarak çalışır: belirsiz koşuları atla, güvenli olanları oyna.
+    Geçit eşiği üstündeki koşularda Kelly çarpanı Bayes top-1
+    ortalamasının eşiğe uzaklığıyla ölçeklenir
+    (<span class="kelly-mult-badge">kelly = base × (0.5 + 0.5×conf)</span>).
+    Sınırda olan koşular yarım Kelly, çok güvenli olanlar tam Kelly alır.
 </div>
 
-{# TJK terminology cheatsheet — 2026-04-23 session learnings #}
+{# TJK terminology cheatsheet — collapsed by default #}
 <details class="mb-3">
     <summary class="text-muted small" style="cursor: pointer;">
-        🎫 TJK bahis rehberi (Kutu ≠ Komple, minimum stake'ler, bilet slip widget'ları) — tıkla
+        🎫 TJK bahis rehberi (Kutu ≠ Komple, minimum yatırımlar) — tıkla
     </summary>
     <div class="mt-2 card card-body bg-light small">
         <div class="row g-3">
@@ -37,22 +131,20 @@
                 <table class="table table-sm mt-1 mb-2">
                     <tbody>
                         <tr><td><code>uclu_top1</code></td><td>Sıralı Üçlü Bahis (tek kombinasyon)</td><td class="text-end text-danger">min 20 TL</td></tr>
-                        <tr><td><code>uclu_box6</code></td><td>Sıralı Üçlü Bahis + aynı 3 atı 3 sütuna seç (otomatik Kutu 6)</td><td class="text-end">min ~12 TL</td></tr>
+                        <tr><td><code>uclu_box6</code></td><td>Sıralı Üçlü Bahis + aynı 3 atı 3 sütuna seç (Kutu 6)</td><td class="text-end">min ~12 TL</td></tr>
                         <tr><td><code>sirali_ikili_top1</code></td><td>Sıralı İkili Bahis (tek kombinasyon)</td><td class="text-end">min ~2 TL</td></tr>
                         <tr><td><code>ganyan_top1</code></td><td>Ganyan (sadece referans)</td><td class="text-end">min 1 TL</td></tr>
                     </tbody>
                 </table>
-
                 <strong>Bilet slip widget'ları — tuzaklar</strong>
                 <ul class="mb-0">
                     <li><strong>K toggle (yeşil):</strong> <span class="text-danger">Komple</span> — sahadaki tüm atları o sütuna ekler. <strong>KUTU DEĞİL.</strong> Dokunma.</li>
                     <li><strong>Kutu:</strong> Ayrı buton yok. Aynı 3 atı 3 sütuna seçince sistem otomatik 6 permütasyona indirger.</li>
-                    <li><strong>Virgüllü:</strong> Bahis türü dropdown'ındaki alternatif giriş formatı, aynı havuz.</li>
-                    <li><strong>Bahis sayısı:</strong> pre-bet = benzersiz kombinasyon; post-bet = kombinasyon × misli (panik yok).</li>
+                    <li><strong>Bahis sayısı:</strong> pre-bet = benzersiz kombinasyon; post-bet = kombinasyon × misli.</li>
                 </ul>
             </div>
             <div class="col-md-6">
-                <strong>Havuz türleri (dropdown'daki seçenekler)</strong>
+                <strong>Havuz türleri</strong>
                 <table class="table table-sm mt-1 mb-0">
                     <tbody>
                         <tr><td>Ganyan</td><td class="small text-muted">1. sıra</td></tr>
@@ -60,8 +152,7 @@
                         <tr><td>İkili Bahis</td><td class="small text-muted">İlk 2 (sırasız)</td></tr>
                         <tr><td>Sıralı İkili Bahis</td><td class="small text-muted">Tam 1-2</td></tr>
                         <tr class="table-warning"><td>Sıralı Üçlü Bahis</td><td class="small"><strong>Bizim esas havuzumuz</strong> — tam 1-2-3</td></tr>
-                        <tr class="table-danger"><td>3'lü / 4'lü / 6'lı Ganyan</td><td class="small">Ardışık yarışların parlay'i — <strong>BİZİM DEĞİL</strong>, karıştırma!</td></tr>
-                        <tr><td>Çifte Bahis</td><td class="small text-muted">2 ardışık kazanan</td></tr>
+                        <tr class="table-danger"><td>3'lü / 4'lü / 6'lı Ganyan</td><td class="small">Ardışık parlay'i — <strong>BİZİM DEĞİL</strong></td></tr>
                     </tbody>
                 </table>
             </div>
@@ -72,40 +163,47 @@
 <!-- Day summary -->
 <div class="row g-3 mb-4">
     <div class="col-md-3">
-        <div class="card">
+        <div class="card summary-card">
             <div class="card-body py-2">
-                <div class="small text-muted">Races advised</div>
+                <div class="small text-muted">Tavsiye Verilen / Toplam</div>
                 <div class="h4 mb-0">{{ summary.n_advised }} / {{ summary.n_total }}</div>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card">
-            <div class="card-body py-2">
-                <div class="small text-muted">Gross stake</div>
-                <div class="h4 mb-0">{{ "{:,.0f}".format(summary.gross_stake) }} TL</div>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card">
-            <div class="card-body py-2">
-                <div class="small text-muted">Effective stake</div>
-                <div class="h4 mb-0">{{ "{:,.0f}".format(summary.effective_stake) }} TL</div>
-                {% if summary.n_no_pool %}
+                {% if summary.n_skipped_cohort or summary.n_skipped_bayes %}
                 <div class="small text-muted">
-                    {{ summary.n_no_pool }} no-pool picks removed
+                    {% if summary.n_skipped_cohort %}{{ summary.n_skipped_cohort }} kohort{% endif %}
+                    {% if summary.n_skipped_cohort and summary.n_skipped_bayes %} · {% endif %}
+                    {% if summary.n_skipped_bayes %}{{ summary.n_skipped_bayes }} bayes{% endif %}
                 </div>
                 {% endif %}
             </div>
         </div>
     </div>
     <div class="col-md-3">
-        <div class="card
+        <div class="card summary-card">
+            <div class="card-body py-2">
+                <div class="small text-muted">Brüt Yatırım</div>
+                <div class="h4 mb-0">{{ "{:,.0f}".format(summary.gross_stake) }} TL</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card summary-card">
+            <div class="card-body py-2">
+                <div class="small text-muted">Net Yatırım</div>
+                <div class="h4 mb-0">{{ "{:,.0f}".format(summary.effective_stake) }} TL</div>
+                {% if summary.n_no_pool %}
+                <div class="small text-muted">
+                    {{ summary.n_no_pool }} havuzsuz çıkarıldı
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card summary-card
             {% if summary.graded %}{% if summary.net > 0 %}bg-success{% else %}bg-danger{% endif %} text-white{% endif %}">
             <div class="card-body py-2">
                 <div class="small {% if summary.graded %}text-white-50{% else %}text-muted{% endif %}">
-                    {% if summary.graded %}Net P&amp;L ({{ summary.n_with_hit }} hits){% else %}Pending{% endif %}
+                    {% if summary.graded %}Net K/Z ({{ summary.n_with_hit }} isabet){% else %}Beklemede{% endif %}
                 </div>
                 <div class="h4 mb-0">
                     {% if summary.graded %}
@@ -123,19 +221,19 @@
 <!-- Strategy edge stats card -->
 <details class="mb-4">
     <summary class="text-muted small" style="cursor: pointer;">
-        Strategy edge stats (last 90d, used for Kelly sizing) — click to expand
+        Strateji avantaj istatistikleri (son 90 gün, Kelly büyüklüğü için) — tıkla
     </summary>
     <div class="mt-2 table-responsive">
         <table class="table table-sm small">
             <thead>
                 <tr>
-                    <th>Strategy</th>
-                    <th class="text-end">Graded n</th>
-                    <th class="text-end">Hit rate</th>
-                    <th class="text-end">Avg model p</th>
-                    <th class="text-end" title="hit_rate / avg_model_prob — 1.0 means calibrated">Cal factor</th>
-                    <th class="text-end">Avg winning payout</th>
-                    <th class="text-end">avg_b</th>
+                    <th>Strateji</th>
+                    <th class="text-end">Gözlem n</th>
+                    <th class="text-end">İsabet Oranı</th>
+                    <th class="text-end">Ort. Model p</th>
+                    <th class="text-end" title="hit_rate / avg_model_prob — 1.0 ise kalibre">Kalibrasyon</th>
+                    <th class="text-end">Ort. Kazanan Ödeme</th>
+                    <th class="text-end">ort_b</th>
                 </tr>
             </thead>
             <tbody>
@@ -145,7 +243,7 @@
                         <div>{{ strat | strategy_tjk_short }}</div>
                         <code class="text-muted small">{{ strat }}</code>
                     </td>
-                    <td class="text-end">{{ es.n_graded }} ({{ es.n_hits }} hits)</td>
+                    <td class="text-end">{{ es.n_graded }} ({{ es.n_hits }} isabet)</td>
                     <td class="text-end">{{ "{:.1%}".format(es.hit_rate) }}</td>
                     <td class="text-end text-muted">{{ "{:.2%}".format(es.avg_model_prob) }}</td>
                     <td class="text-end">{{ "{:.2f}×".format(es.calibration_factor) }}</td>
@@ -160,41 +258,156 @@
 
 {% if not races_with_picks %}
 <div class="alert alert-warning">
-    {{ target_date }} için advice üretilecek pick bulunamadı.  Scheduler
+    {{ target_date }} için tavsiye üretilecek bahis bulunamadı. Zamanlayıcı
     henüz çalışmadıysa <code>uv run ganyan scrape --today</code> +
     <code>uv run ganyan predict --today</code> ile manuel tetikleyin.
 </div>
 {% endif %}
 
+{% if skipped_cohort_races %}
+<details class="mb-3">
+    <summary class="small text-muted" style="cursor: pointer;">
+        🪤 Kohort filtresi ile atlanan {{ skipped_cohort_races|length }} koşu
+        (Maiden /Dişi · alan≥13 · Şanlıurfa/Bursa)
+    </summary>
+    <ul class="small text-muted mt-2 mb-0">
+        {% for s in skipped_cohort_races %}
+        <li>{{ s.track }} R{{ s.race_number }} {{ s.post_time or "--:--" }} — {{ s.reason }}</li>
+        {% endfor %}
+    </ul>
+</details>
+{% endif %}
+
+{% if skipped_bayes_races %}
+<details class="mb-3" open>
+    <summary class="small" style="cursor: pointer;">
+        <span class="badge bg-primary">Bayes geçit</span>
+        {{ skipped_bayes_races|length }} koşu atlandı — top-1 belirsiz
+    </summary>
+    <div class="mt-2 table-responsive">
+        <table class="table table-sm small mb-0">
+            <thead class="text-muted">
+                <tr>
+                    <th>Koşu</th>
+                    <th>Bayes top-1</th>
+                    <th class="text-end" style="min-width: 180px">90% güven aralığı</th>
+                    <th>Sebep</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in skipped_bayes_races %}
+                <tr>
+                    <td>
+                        <strong>{{ s.track }}</strong> R{{ s.race_number }}
+                        <span class="text-muted">{{ s.post_time or "--:--" }}</span>
+                    </td>
+                    <td>{{ s.bayes_top1_horse or "—" }}</td>
+                    <td class="text-end">
+                        {% if s.bayes_top1_mean is not none %}
+                        <div class="d-flex align-items-center justify-content-end gap-2">
+                            <div class="ci-bar">
+                                <div class="ci-range"
+                                     style="left: {{ (s.bayes_top1_lo5 * 100) | round(1) }}%;
+                                            width: {{ ((s.bayes_top1_hi95 - s.bayes_top1_lo5) * 100) | round(1) }}%"></div>
+                                <div class="ci-mean"
+                                     style="left: {{ (s.bayes_top1_mean * 100) | round(1) }}%"></div>
+                                <div class="ci-gate" style="left: 35%"
+                                     title="35% gate threshold"></div>
+                            </div>
+                            <span class="ci-label text-muted">
+                                {{ "{:.0%}".format(s.bayes_top1_mean) }}
+                                [{{ "{:.0%}".format(s.bayes_top1_lo5) }}–{{ "{:.0%}".format(s.bayes_top1_hi95) }}]
+                            </span>
+                        </div>
+                        {% else %}
+                        <span class="text-muted">—</span>
+                        {% endif %}
+                    </td>
+                    <td><span class="text-muted">{{ s.reason }}</span></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</details>
+{% endif %}
+
 <!-- Per-race cards -->
 {% for item in races_with_picks %}
-<div class="card mb-3">
-    <div class="card-header d-flex justify-content-between align-items-center">
+{% set bt = item.bayes_top %}
+{% set conf = item.bayes_conf %}
+<div class="card race-card mb-3
+    {% if conf is not none and conf >= 0.5 %}bayes-pass
+    {% elif conf is not none %}bayes-borderline
+    {% else %}bayes-noinfo{% endif %}">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <div>
             <strong>{{ item.race.track.name }}</strong>
             <span class="text-muted">R{{ item.race.race_number }}</span>
             <span class="ms-2">{{ item.race.post_time or "--:--" }}</span>
             <span class="ms-2 text-muted">{{ item.race.distance_meters or 0 }}m</span>
             {% if item.race.status.value == "resulted" %}
-                <span class="badge bg-secondary ms-2">resulted</span>
+                <span class="badge bg-secondary ms-2">sonuçlandı</span>
             {% elif item.race.status.value == "scheduled" %}
-                <span class="badge bg-primary ms-2">scheduled</span>
+                <span class="badge bg-primary ms-2">planlandı</span>
             {% endif %}
         </div>
         <a href="/races/{{ item.race.id }}/predict"
-           class="btn btn-sm btn-outline-secondary">per-race →</a>
+           class="btn btn-sm btn-outline-secondary">koşu detayı →</a>
     </div>
+
+    {% if bt is not none %}
+    <!-- Bayes top-1 readout strip -->
+    <div class="px-3 py-2 small border-bottom bg-light">
+        <div class="row g-2 align-items-center">
+            <div class="col-md-3">
+                <span class="text-muted">Bayes top-1:</span>
+                <strong>{{ bt.horse_name }}</strong>
+            </div>
+            <div class="col-md-5">
+                <div class="d-flex align-items-center gap-2">
+                    <div class="ci-bar flex-grow-1">
+                        <div class="ci-range"
+                             style="left: {{ (bt.lo_5 * 100) | round(1) }}%;
+                                    width: {{ ((bt.hi_95 - bt.lo_5) * 100) | round(1) }}%"></div>
+                        <div class="ci-mean"
+                             style="left: {{ (bt.mean_prob * 100) | round(1) }}%"></div>
+                        <div class="ci-gate" style="left: 35%"></div>
+                    </div>
+                    <span class="ci-label text-nowrap">
+                        <strong>{{ "{:.0%}".format(bt.mean_prob) }}</strong>
+                        <span class="text-muted">[{{ "{:.0%}".format(bt.lo_5) }}–{{ "{:.0%}".format(bt.hi_95) }}]</span>
+                    </span>
+                </div>
+            </div>
+            <div class="col-md-4 text-end">
+                {% if conf is not none %}
+                <span class="text-muted small">conf:</span>
+                <span class="bayes-conf-meter">
+                    <span class="bayes-conf-fill"
+                          style="width: {{ (conf * 100) | round(1) }}%"></span>
+                </span>
+                <strong>{{ "{:.2f}".format(conf) }}</strong>
+                <span class="kelly-mult-badge ms-1">
+                    kelly×{{ "{:.2f}".format(item.kelly_mult_eff) }}
+                </span>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     <div class="card-body">
         <table class="table table-sm mb-0">
             <thead class="small text-muted">
                 <tr>
-                    <th>Strategy</th>
-                    <th>Combination</th>
-                    <th class="text-end" title="Raw Harville joint probability">Raw p</th>
-                    <th class="text-end" title="Calibrated to empirical hit rate">Cal. p</th>
-                    <th class="text-end">Base stake</th>
+                    <th>Strateji</th>
+                    <th>Kombinasyon</th>
+                    <th class="text-end" title="Ham Harville birleşik olasılığı">Ham p</th>
+                    <th class="text-end" title="Ampirik isabet oranına kalibre edildi">Kal. p</th>
+                    <th class="text-end">Sabit</th>
                     <th class="text-end">Kelly</th>
-                    <th>Result</th>
+                    <th>Sonuç</th>
                 </tr>
             </thead>
             <tbody>
@@ -214,21 +427,21 @@
                         {% if pick.kelly_tl and pick.kelly_tl > 0 %}
                             <strong>{{ "{:,.0f}".format(pick.kelly_tl) }} TL</strong>
                         {% else %}
-                            <span class="text-muted">skip</span>
+                            <span class="text-muted">atla</span>
                         {% endif %}
                     </td>
                     <td>
                         {% if pick.hit %}
-                            <span class="badge bg-success">✓ HIT</span>
+                            <span class="badge bg-success">✓ İSABET</span>
                             <small class="text-muted">
                                 {{ "{:,.0f}".format(pick.payout_tl or 0) }} TL
                             </small>
                         {% elif pick.is_miss %}
-                            <span class="badge bg-danger">✗ miss</span>
+                            <span class="badge bg-danger">✗ ıska</span>
                         {% elif pick.is_no_pool %}
-                            <span class="badge bg-light text-dark">no-pool</span>
+                            <span class="badge bg-light text-dark">havuzsuz</span>
                         {% else %}
-                            <span class="badge bg-secondary">pending</span>
+                            <span class="badge bg-secondary">beklemede</span>
                         {% endif %}
                     </td>
                 </tr>
@@ -237,38 +450,32 @@
         </table>
         {% if item.winner_name %}
         <div class="small text-muted mt-2">
-            Actual winner: <strong>{{ item.winner_name }}</strong>
+            Gerçek galip: <strong>{{ item.winner_name }}</strong>
         </div>
         {% endif %}
 
         {% if item.harville %}
         <details class="mt-3">
             <summary class="small text-muted" style="cursor: pointer;">
-                Harville model breakdown — full win-prob ranking + top combinations
+                Harville model dökümü — tam kazanma olasılığı sıralaması + en iyi kombinasyonlar
             </summary>
             <div class="row mt-2 g-2">
                 <div class="col-md-4">
                     <div class="small text-muted mb-1">
-                        Win probabilities (Ganyan ranking)
+                        Kazanma Olasılıkları (Ganyan sıralaması)
                     </div>
                     <table class="table table-sm small mb-0">
                         <tbody>
                             {% for h in item.harville.win_probs %}
                             <tr {% if h.finish_position == 1 %}class="table-success"
                                 {% elif h.finish_position in [2, 3] %}class="table-info"{% endif %}>
-                                <td class="text-muted" style="width: 2em">
-                                    {{ loop.index }}.
-                                </td>
+                                <td class="text-muted" style="width: 2em">{{ loop.index }}.</td>
                                 <td>{{ h.horse_name }}</td>
-                                <td class="text-end">
-                                    {{ "{:.1f}%".format(h.prob_pct) }}
-                                </td>
+                                <td class="text-end">{{ "{:.1f}%".format(h.prob_pct) }}</td>
                                 {% if h.finish_position %}
                                 <td class="text-muted" style="width: 2.5em">
                                     {% if h.finish_position <= 3 %}
-                                        <span class="badge bg-secondary">
-                                            {{ h.finish_position }}
-                                        </span>
+                                        <span class="badge bg-secondary">{{ h.finish_position }}</span>
                                     {% else %}
                                         {{ h.finish_position }}
                                     {% endif %}
@@ -282,24 +489,15 @@
 
                 <div class="col-md-4">
                     <div class="small text-muted mb-1">
-                        Üçlü Top-{{ item.harville.uclu_top | length }}
-                        (Harville joint, exact order)
+                        Üçlü En İyi {{ item.harville.uclu_top | length }}
                     </div>
                     <table class="table table-sm small mb-0">
                         <tbody>
                             {% for c in item.harville.uclu_top %}
                             <tr {% if c.hit %}class="table-success"{% endif %}>
-                                <td class="text-muted" style="width: 2em">
-                                    {{ loop.index }}.
-                                </td>
-                                <td>
-                                    <small>
-                                        {{ c.combination_names | join(" → ") }}
-                                    </small>
-                                </td>
-                                <td class="text-end">
-                                    {{ "{:.2f}%".format(c.prob_pct) }}
-                                </td>
+                                <td class="text-muted" style="width: 2em">{{ loop.index }}.</td>
+                                <td><small>{{ c.combination_names | join(" → ") }}</small></td>
+                                <td class="text-end">{{ "{:.2f}%".format(c.prob_pct) }}</td>
                             </tr>
                             {% endfor %}
                         </tbody>
@@ -308,22 +506,15 @@
 
                 <div class="col-md-4">
                     <div class="small text-muted mb-1">
-                        Sıralı İkili Top-{{ item.harville.sirali_top | length }}
-                        (Harville joint, exact order)
+                        Sıralı İkili En İyi {{ item.harville.sirali_top | length }}
                     </div>
                     <table class="table table-sm small mb-0">
                         <tbody>
                             {% for c in item.harville.sirali_top %}
                             <tr {% if c.hit %}class="table-success"{% endif %}>
-                                <td class="text-muted" style="width: 2em">
-                                    {{ loop.index }}.
-                                </td>
-                                <td>
-                                    {{ c.combination_names | join(" → ") }}
-                                </td>
-                                <td class="text-end">
-                                    {{ "{:.2f}%".format(c.prob_pct) }}
-                                </td>
+                                <td class="text-muted" style="width: 2em">{{ loop.index }}.</td>
+                                <td>{{ c.combination_names | join(" → ") }}</td>
+                                <td class="text-end">{{ "{:.2f}%".format(c.prob_pct) }}</td>
                             </tr>
                             {% endfor %}
                         </tbody>
