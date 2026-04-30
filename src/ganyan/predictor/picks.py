@@ -40,6 +40,31 @@ STAKE_PER_TICKET_TL = 100.0
 STRATEGIES = ("ganyan_top1", "uclu_top1", "uclu_box6", "sirali_ikili_top1")
 
 
+# Per-pool minimum bilet stake ("birim fiyat") in TL.
+#
+# Critical: TJK publishes pool payouts as "what one bilet at the default
+# birim wins" — NOT per 1 TL staked.  For ganyan/sirali_ikili the birim
+# is 1 TL so per-bilet equals per-TL and our older math accidentally
+# came out right.  For Sıralı Üçlü the birim is 2 TL, so naïve
+# `payout_value × stake` overstates the winnings by 2×.
+#
+# Verified Apr 30 2026 against operator's actual bilet 68671854006416
+# on Ankara R8 (uclu_box6 with K-Komple, 4 horses, Misli=4):
+#   Tutar 192 ₺, pool figure 92.50, real payout 370 ₺.
+#   Reconciles only as `92.50 × Misli=4` — i.e. 92.50 is per-bilet at
+#   2 ₺ birim, not per-TL.  Per-TL rate was 46.25.
+BIRIM_TL_BY_STRATEGY = {
+    "ganyan_top1": 1.0,
+    "sirali_ikili_top1": 1.0,  # tentative — to verify with a real bilet
+    "uclu_top1": 2.0,           # verified
+    "uclu_box6": 2.0,           # verified
+}
+
+
+def _birim_tl(strategy: str) -> float:
+    return BIRIM_TL_BY_STRATEGY.get(strategy, 1.0)
+
+
 def generate_picks_for_race(
     session: Session, race_id: int, *, refresh: bool = False,
 ) -> list[Pick]:
@@ -279,7 +304,14 @@ def grade_race(session: Session, race_id: int) -> int:
         pick.graded_at = now
         if hit:
             # One winning ticket out of ``ticket_count``; rest lost.
-            winning_ticket_payout = payout_per_tl * STAKE_PER_TICKET_TL
+            # Pool figure is per-bilet at the pool's birim — divide by
+            # birim so that `value × stake_per_ticket / birim` gives the
+            # actual TL payout. (Pre-2026-04-30 this divisor was missing;
+            # üçlü hits were overstated 2×.)
+            birim = _birim_tl(pick.strategy)
+            winning_ticket_payout = (
+                payout_per_tl * STAKE_PER_TICKET_TL / birim
+            )
             pick.payout_tl = round(winning_ticket_payout, 2)
             pick.net_tl = round(winning_ticket_payout - float(pick.stake_tl), 2)
         else:
