@@ -47,6 +47,10 @@ class TrainingFrame:
     # Workout sec-per-meter, recency-mean of last N prior workouts.
     # 0.0 = horse has no recorded workouts (cold-start).
     workout_of_horse_in_race: List[float] = field(default_factory=list)
+    # Pace preference: mean pace-z-score across the horse's prior top-3
+    # finishes (negative = closer type, positive = front-runner type).
+    # 0.0 = no qualifying history.
+    pace_of_horse_in_race: List[float] = field(default_factory=list)
 
 
 def summarize_last_six(s: str | None) -> float:
@@ -90,6 +94,7 @@ def matrices_for_pymc(frame: TrainingFrame):
     last6_z_mat = np.zeros((R, K_max), dtype="float64")
     speed_z_mat = np.zeros((R, K_max), dtype="float64")
     workout_z_mat = np.zeros((R, K_max), dtype="float64")
+    pace_z_mat = np.zeros((R, K_max), dtype="float64")
     track_dist_arr = np.zeros(R, dtype="int64")
 
     has_jockey = len(frame.jockey_of_horse_in_race) > 0
@@ -100,6 +105,7 @@ def matrices_for_pymc(frame: TrainingFrame):
     has_last6 = len(frame.last6_of_horse_in_race) > 0
     has_speed = len(frame.speed_of_horse_in_race) > 0
     has_workout = len(frame.workout_of_horse_in_race) > 0
+    has_pace = len(frame.pace_of_horse_in_race) > 0
 
     def _zscore(slice_arr: np.ndarray) -> np.ndarray:
         std = slice_arr.std()
@@ -148,6 +154,11 @@ def matrices_for_pymc(frame: TrainingFrame):
                 frame.workout_of_horse_in_race[flat_idx : flat_idx + n],
                 dtype="float64",
             ))
+        if has_pace:
+            pace_z_mat[r, :n] = _zscore(np.asarray(
+                frame.pace_of_horse_in_race[flat_idx : flat_idx + n],
+                dtype="float64",
+            ))
         valid_mask[r, :n] = True
         flat_idx += n
 
@@ -169,6 +180,7 @@ def matrices_for_pymc(frame: TrainingFrame):
         "last6_z_mat": last6_z_mat,
         "speed_z_mat": speed_z_mat,
         "workout_z_mat": workout_z_mat,
+        "pace_z_mat": pace_z_mat,
         "valid_mask": valid_mask,
         "horse_to_sire": horse_to_sire,
     }
@@ -187,6 +199,7 @@ def build_training_frame(
     min_field_size: int = 3,
     include_speed: bool = True,
     include_workouts: bool = True,
+    include_pace: bool = True,
 ) -> TrainingFrame:
     """Build a per-race ordered frame for PL training.
 
@@ -219,6 +232,16 @@ def build_training_frame(
         from ganyan.predictor.workouts import build_horse_workout_history
         workout_history = build_horse_workout_history(session, to_date=to_date)
 
+    pace_history = None
+    if include_pace:
+        from ganyan.predictor.pace import (
+            build_horse_pace_history, compute_pace_baseline,
+        )
+        pace_baseline = compute_pace_baseline(session, to_date=to_date)
+        pace_history = build_horse_pace_history(
+            session, pace_baseline, to_date=to_date,
+        )
+
     races = session.execute(
         select(Race).where(
             Race.date >= from_date,
@@ -243,6 +266,7 @@ def build_training_frame(
         last6s: List[float] = []
         speeds: List[float] = []
         workouts: List[float] = []
+        paces: List[float] = []
         for e in finishers:
             horse_ids.append(_intern(frame.horse_index, e.horse_id))
             jockey_ids.append(_intern(frame.jockey_index, e.jockey))
@@ -264,6 +288,12 @@ def build_training_frame(
                 workouts.append(w if w is not None else 0.0)
             else:
                 workouts.append(0.0)
+            if pace_history is not None:
+                from ganyan.predictor.pace import horse_pace_score
+                p = horse_pace_score(pace_history, e.horse_id, r.date)
+                paces.append(p if p is not None else 0.0)
+            else:
+                paces.append(0.0)
         track_dist = (r.track_id, distance_bucket_for(r.distance_meters or 0))
         frame.track_dist_of_race[r.id] = _intern(frame.track_dist_index, track_dist)
         frame.orderings[r.id] = horse_ids
@@ -275,5 +305,6 @@ def build_training_frame(
         frame.last6_of_horse_in_race.extend(last6s)
         frame.speed_of_horse_in_race.extend(speeds)
         frame.workout_of_horse_in_race.extend(workouts)
+        frame.pace_of_horse_in_race.extend(paces)
 
     return frame

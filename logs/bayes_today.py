@@ -30,9 +30,14 @@ def main():
         from ganyan.predictor.workouts import (
             build_horse_workout_history, horse_workout_score,
         )
+        from ganyan.predictor.pace import (
+            build_horse_pace_history, compute_pace_baseline, horse_pace_score,
+        )
         variants = compute_track_variants(s, to_date=target_date)
         speed_history = build_horse_speed_history(s, variants, to_date=target_date)
         workout_history = build_horse_workout_history(s, to_date=target_date)
+        pace_baseline = compute_pace_baseline(s, to_date=target_date)
+        pace_history = build_horse_pace_history(s, pace_baseline, to_date=target_date)
 
         races = s.execute(
             select(Race).join(Track).where(Race.date == target_date)
@@ -92,6 +97,10 @@ def main():
                 ],
                 "workouts": [
                     horse_workout_score(workout_history, e.horse_id, r.date) or 0.0
+                    for e in entries
+                ],
+                "paces": [
+                    horse_pace_score(pace_history, e.horse_id, r.date) or 0.0
                     for e in entries
                 ],
             }

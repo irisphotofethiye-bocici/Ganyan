@@ -45,13 +45,19 @@ def main():
         from ganyan.predictor.workouts import (
             build_horse_workout_history, horse_workout_score,
         )
+        from ganyan.predictor.pace import (
+            build_horse_pace_history, compute_pace_baseline, horse_pace_score,
+        )
         print("Building speed-figure history (variants + per-horse) …")
         variants = compute_track_variants(s, to_date=td)
         speed_history = build_horse_speed_history(s, variants, to_date=td)
         workout_history = build_horse_workout_history(s, to_date=td)
+        pace_baseline = compute_pace_baseline(s, to_date=td)
+        pace_history = build_horse_pace_history(s, pace_baseline, to_date=td)
         print(f"  variants: {len(variants)} (track,bucket,date) cells; "
               f"horses with speed history: {len(speed_history)}; "
-              f"horses with workouts: {len(workout_history)}")
+              f"horses with workouts: {len(workout_history)}; "
+              f"horses with pace history: {len(pace_history)}")
 
         races = s.execute(
             select(Race).where(Race.date >= fd, Race.date <= td)
@@ -99,6 +105,10 @@ def main():
                 ],
                 "workouts": [
                     horse_workout_score(workout_history, e.horse_id, r.date) or 0.0
+                    for e in r.entries
+                ],
+                "paces": [
+                    horse_pace_score(pace_history, e.horse_id, r.date) or 0.0
                     for e in r.entries
                 ],
             }

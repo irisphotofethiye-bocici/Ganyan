@@ -59,6 +59,7 @@ def predict_from_posterior(
     delta_last6 = _opt_coef("delta_last6")
     delta_speed = _opt_coef("delta_speed")
     delta_workouts = _opt_coef("delta_workouts")
+    delta_pace = _opt_coef("delta_pace")
 
     S = delta.shape[0]
     n = len(race["horse_ids"])
@@ -119,6 +120,11 @@ def predict_from_posterior(
             [w if w is not None else 0.0 for w in race["workouts"]], dtype=float,
         )
         score += np.outer(_zscore(workout_arr), delta_workouts)
+    if delta_pace is not None and "paces" in race:
+        pace_arr = np.asarray(
+            [p if p is not None else 0.0 for p in race["paces"]], dtype=float,
+        )
+        score += np.outer(_zscore(pace_arr), delta_pace)
 
     score -= score.max(axis=0, keepdims=True)
     exps = np.exp(score)
