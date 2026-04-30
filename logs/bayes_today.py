@@ -24,6 +24,12 @@ def main():
 
     eng = create_engine("postgresql+psycopg://ganyan:ganyan@localhost:5432/ganyan")
     with Session(eng) as s:
+        from ganyan.predictor.speed_figures import (
+            build_horse_speed_history, compute_track_variants, horse_speed_score,
+        )
+        variants = compute_track_variants(s, to_date=target_date)
+        speed_history = build_horse_speed_history(s, variants, to_date=target_date)
+
         races = s.execute(
             select(Race).join(Track).where(Race.date == target_date)
             .order_by(Race.date, Race.race_number)
@@ -76,6 +82,10 @@ def main():
                     for e in entries
                 ],
                 "last_sixes": [e.last_six or "" for e in entries],
+                "speeds": [
+                    horse_speed_score(speed_history, e.horse_id, r.date) or 0.0
+                    for e in entries
+                ],
             }
             bpreds = predict_from_posterior(idata, frame, race_in)
             b_top1 = bpreds[0]

@@ -135,12 +135,14 @@ def build_hierarchical_pl_model_with_agf(frame: TrainingFrame) -> pm.Model:
 
 
 def build_full_hierarchical_pl_model(frame: TrainingFrame) -> pm.Model:
-    """Hierarchical PL with AGF prior + private signals (kgs, s20, last_six).
+    """Hierarchical PL with AGF prior + private signals.
 
-    Adds three Normal(0, 1) coefficients on within-race z-scores of:
-      - kgs (days since last race; sign indeterminate, model finds it)
-      - s20 (last-20 perf score; expect positive coefficient — higher=better)
-      - last6 (mean recent finish position; expect negative — lower=better)
+    Adds Normal(0, 1) coefficients on within-race z-scores of:
+      - kgs (days since last race)
+      - s20 (last-20 perf score)
+      - last6 (mean recent finish position; lower=better)
+      - speed (track-variant-adjusted sec/m, recency-mean; lower=faster,
+        so expect a negative coefficient).
 
     Cold-start safe: if a horse has no value, it enters as 0 (within-race
     mean), so the term contributes 0 to that horse's PL score.
@@ -174,6 +176,7 @@ def build_full_hierarchical_pl_model(frame: TrainingFrame) -> pm.Model:
         delta_kgs = pm.Normal("delta_kgs", 0.0, 1.0)
         delta_s20 = pm.Normal("delta_s20", 0.0, 1.0)
         delta_last6 = pm.Normal("delta_last6", 0.0, 1.0)
+        delta_speed = pm.Normal("delta_speed", 0.0, 1.0)
 
         score = (
             theta[mats["horse_idx_mat"]]
@@ -183,6 +186,7 @@ def build_full_hierarchical_pl_model(frame: TrainingFrame) -> pm.Model:
             + delta_kgs * mats["kgs_z_mat"]
             + delta_s20 * mats["s20_z_mat"]
             + delta_last6 * mats["last6_z_mat"]
+            + delta_speed * mats["speed_z_mat"]
         )
         pm.Potential(
             "plackett_luce_full",

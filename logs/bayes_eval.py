@@ -39,6 +39,15 @@ def main():
     n_skipped = 0
 
     with Session(eng) as s:
+        from ganyan.predictor.speed_figures import (
+            build_horse_speed_history, compute_track_variants, horse_speed_score,
+        )
+        print("Building speed-figure history (variants + per-horse) …")
+        variants = compute_track_variants(s, to_date=td)
+        speed_history = build_horse_speed_history(s, variants, to_date=td)
+        print(f"  variants: {len(variants)} (track,bucket,date) cells; "
+              f"horses with speed history: {len(speed_history)}")
+
         races = s.execute(
             select(Race).where(Race.date >= fd, Race.date <= td)
             .order_by(Race.date, Race.race_number)
@@ -79,6 +88,10 @@ def main():
                     for e in r.entries
                 ],
                 "last_sixes": [e.last_six or "" for e in r.entries],
+                "speeds": [
+                    horse_speed_score(speed_history, e.horse_id, r.date) or 0.0
+                    for e in r.entries
+                ],
             }
             preds = predict_from_posterior(idata, frame, race_in)
             bayes_races.append([

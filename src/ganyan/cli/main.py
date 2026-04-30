@@ -2029,6 +2029,7 @@ def advice_cmd(
     BETTING_STRATEGIES = ("uclu_top1", "uclu_box6", "sirali_ikili_top1")
 
     bayes_idata = bayes_frame = None
+    bayes_speed_history = None
     bayes_posterior_path = _Path(bayes_posterior)
     if bayes_skip:
         nc_file = bayes_posterior_path.with_suffix(".nc")
@@ -2082,6 +2083,12 @@ def advice_cmd(
             ],
             "last_sixes": [e.last_six or "" for e in entries],
         }
+        if bayes_speed_history is not None:
+            from ganyan.predictor.speed_figures import horse_speed_score
+            race_in["speeds"] = [
+                horse_speed_score(bayes_speed_history, e.horse_id, race.date) or 0.0
+                for e in entries
+            ]
         try:
             preds = predict_from_posterior(bayes_idata, bayes_frame, race_in)
         except Exception:  # noqa: BLE001
@@ -2154,6 +2161,14 @@ def advice_cmd(
 
     session = get_session()
     try:
+        if bayes_idata is not None:
+            from ganyan.predictor.speed_figures import (
+                build_horse_speed_history, compute_track_variants,
+            )
+            variants = compute_track_variants(session, to_date=target_date)
+            bayes_speed_history = build_horse_speed_history(
+                session, variants, to_date=target_date,
+            )
         edge_stats = strategy_edge_stats(
             session,
             strategies=BETTING_STRATEGIES,
