@@ -57,6 +57,44 @@
     </div>
 </div>
 
+<!-- Trip-wire — daily top-1-prob z-score sanity check vs 90d baseline -->
+{% if trip_info %}
+    {% if trip_fired %}
+    <div class="alert alert-danger mb-3">
+        <strong>⚠️ TRIP-WIRE FIRED</strong> —
+        model is
+        {% if trip_info.z_score > 0 %}<strong>OVER</strong>{% else %}<strong>UNDER</strong>{% endif %}-confident
+        today (z = {{ '%+.2f'|format(trip_info.z_score) }}).
+        <span class="ms-2 small">
+            Bugün ort. top-1: <strong>{{ '%.1f'|format(trip_info.today_avg) }}%</strong> ·
+            {{ trip_info.n_baseline_days }}d baseline:
+            {{ '%.1f'|format(trip_info.baseline_mean) }}% ± {{ '%.1f'|format(trip_info.baseline_std) }}%
+        </span>
+        <div class="small mt-1">
+            Olası neden: AGF / last_six / KGS pipeline'ından biri henüz yayılmamış,
+            tüm atlar uniform 1/N softmax'a düşüyor olabilir.
+            <a href="?date={{ target_date }}&amp;bypass=1{% if not cohort_filter_on %}&amp;cohort_filter=0{% endif %}{% if not bayes_skip_on %}&amp;bayes_skip=0{% endif %}"
+               class="alert-link">Sebebini doğruladıysan bypass et →</a>
+        </div>
+    </div>
+    {% elif trip_bypassed %}
+    <div class="alert alert-warning py-2 small mb-3">
+        <strong>Trip-wire bypass aktif</strong> — z = {{ '%+.2f'|format(trip_info.z_score) }}
+        ({{ '%.1f'|format(trip_info.today_avg) }}% vs baseline
+        {{ '%.1f'|format(trip_info.baseline_mean) }}%).
+        Operatör manuel olarak devam etmeyi seçti.
+    </div>
+    {% else %}
+    <div class="text-muted small mb-3">
+        Trip-wire OK · z = {{ '%+.2f'|format(trip_info.z_score) }}
+        ({{ '%.1f'|format(trip_info.today_avg) }}% vs
+        {{ trip_info.n_baseline_days }}d baseline
+        {{ '%.1f'|format(trip_info.baseline_mean) }}% ± {{ '%.1f'|format(trip_info.baseline_std) }}%)
+    </div>
+    {% endif %}
+{% endif %}
+
+{% if not trip_fired %}
 <!-- Top filter strip — shows what's filtering races right now -->
 <div class="card mb-3 bg-light border-0">
     <div class="card-body py-2 small">
@@ -528,5 +566,6 @@
     </div>
 </div>
 {% endfor %}
+{% endif %}{# /not trip_fired — when the trip-wire is firing the page body is hidden #}
 
 {% endblock %}

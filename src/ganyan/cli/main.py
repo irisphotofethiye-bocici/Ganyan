@@ -2125,54 +2125,7 @@ def advice_cmd(
             )
         return None
 
-    def _trip_wire_check(session) -> dict | None:
-        """Return today vs 90d-baseline stats for top-1 model_prob.
-
-        None if insufficient baseline (<30 days with data) or no races today.
-        """
-        from datetime import timedelta
-        from sqlalchemy import func, select
-        from ganyan.db.models import RaceEntry
-        import numpy as np
-
-        since = target_date - timedelta(days=trip_wire_lookback + 1)
-        per_race_top1 = (
-            select(
-                Race.date.label("d"),
-                Race.id.label("rid"),
-                func.max(RaceEntry.predicted_probability).label("top1"),
-            )
-            .join(RaceEntry, RaceEntry.race_id == Race.id)
-            .where(Race.date >= since, Race.date <= target_date)
-            .where(RaceEntry.predicted_probability.is_not(None))
-            .group_by(Race.id, Race.date)
-            .subquery()
-        )
-        rows = session.execute(
-            select(
-                per_race_top1.c.d, func.avg(per_race_top1.c.top1).label("daily_avg"),
-            )
-            .group_by(per_race_top1.c.d)
-            .order_by(per_race_top1.c.d)
-        ).all()
-        daily = {row.d: float(row.daily_avg) for row in rows}
-        today_avg = daily.pop(target_date, None)
-        if today_avg is None:
-            return None
-        if len(daily) < 30:
-            return None
-        arr = np.fromiter(daily.values(), dtype="float64")
-        baseline_mean = float(arr.mean())
-        baseline_std = float(arr.std())
-        if baseline_std < 1e-9:
-            return None
-        return {
-            "today_avg": today_avg,
-            "baseline_mean": baseline_mean,
-            "baseline_std": baseline_std,
-            "z_score": (today_avg - baseline_mean) / baseline_std,
-            "n_baseline_days": len(daily),
-        }
+    from ganyan.predictor.trip_wire import compute_trip_wire
 
     session = get_session()
     try:
@@ -2217,7 +2170,10 @@ def advice_cmd(
                            f"--from {target_date} --to {target_date}")
             return
 
-        trip_info = _trip_wire_check(session) if trip_wire else None
+        trip_info = (
+            compute_trip_wire(session, target_date, lookback_days=trip_wire_lookback)
+            if trip_wire else None
+        )
         if trip_info is not None and abs(trip_info["z_score"]) > trip_wire_sigma:
             direction = "OVER-confident" if trip_info["z_score"] > 0 else "UNDER-confident"
             typer.echo(

@@ -1273,6 +1273,7 @@ def advice_dashboard():
         ganyan_probabilities, sirali_ikili_probabilities,
         uclu_probabilities,
     )
+    from ganyan.predictor.trip_wire import compute_trip_wire
     from sqlalchemy.orm import joinedload
 
     BETTING_STRATEGIES = ("uclu_top1", "uclu_box6", "sirali_ikili_top1")
@@ -1290,6 +1291,9 @@ def advice_dashboard():
     bayes_posterior_path = request.args.get(
         "bayes_posterior", "models/bayes_pl_v3",
     )
+    # Trip-wire (avg top-1 prob z-score vs 90d baseline). ?bypass=1 disables.
+    trip_wire_sigma = float(request.args.get("trip_wire_sigma", 2.0))
+    trip_wire_bypass = request.args.get("bypass", "0") in ("1", "true")
     try:
         target_date = (
             _dt.strptime(date_str, "%Y-%m-%d").date() if date_str else date.today()
@@ -1738,6 +1742,13 @@ def advice_dashboard():
                 ],
             })
 
+        trip_info = compute_trip_wire(session, target_date)
+        trip_fired = (
+            trip_info is not None
+            and abs(trip_info["z_score"]) > trip_wire_sigma
+            and not trip_wire_bypass
+        )
+
         return render_template(
             "advice.html",
             target_date=str(target_date),
@@ -1748,6 +1759,10 @@ def advice_dashboard():
             bayes_skip_on=bayes_skip,
             summary=summary,
             edge_stats=edge_display,
+            trip_info=trip_info,
+            trip_sigma=trip_wire_sigma,
+            trip_fired=trip_fired,
+            trip_bypassed=trip_wire_bypass,
         )
     finally:
         session.close()
