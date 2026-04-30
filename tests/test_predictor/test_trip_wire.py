@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from ganyan.db.models import Base, Horse, Race, RaceEntry, RaceStatus, Track
-from ganyan.predictor.trip_wire import compute_trip_wire
+from ganyan.predictor.trip_wire import compute_trip_wire, is_anomalous, is_halt
 
 
 @pytest.fixture
@@ -86,3 +86,25 @@ def test_z_score_calc_with_real_variance(session):
     assert info["baseline_std"] > 0
     assert info["z_score"] > 5.0  # Way above baseline
     assert info["n_baseline_days"] == 60
+
+
+def test_is_halt_only_fires_on_under_confidence():
+    over = {"z_score": 3.0}    # OVER-confident — should NOT halt
+    under = {"z_score": -3.0}  # UNDER-confident — should halt
+    edge_pos = {"z_score": 2.5}
+    edge_neg = {"z_score": -2.5}
+    assert is_halt(over, sigma=2.0) is False
+    assert is_halt(under, sigma=2.0) is True
+    assert is_halt(edge_pos, sigma=2.0) is False
+    assert is_halt(edge_neg, sigma=2.0) is True
+    assert is_halt(None, sigma=2.0) is False
+
+
+def test_is_anomalous_is_symmetric():
+    over = {"z_score": 3.0}
+    under = {"z_score": -3.0}
+    quiet = {"z_score": 1.0}
+    assert is_anomalous(over, sigma=2.0) is True
+    assert is_anomalous(under, sigma=2.0) is True
+    assert is_anomalous(quiet, sigma=2.0) is False
+    assert is_anomalous(None, sigma=2.0) is False

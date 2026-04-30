@@ -1273,7 +1273,7 @@ def advice_dashboard():
         ganyan_probabilities, sirali_ikili_probabilities,
         uclu_probabilities,
     )
-    from ganyan.predictor.trip_wire import compute_trip_wire
+    from ganyan.predictor.trip_wire import compute_trip_wire, is_anomalous, is_halt
     from sqlalchemy.orm import joinedload
 
     BETTING_STRATEGIES = ("uclu_top1", "uclu_box6", "sirali_ikili_top1")
@@ -1743,10 +1743,10 @@ def advice_dashboard():
             })
 
         trip_info = compute_trip_wire(session, target_date)
-        trip_fired = (
-            trip_info is not None
-            and abs(trip_info["z_score"]) > trip_wire_sigma
-            and not trip_wire_bypass
+        trip_halt = is_halt(trip_info, trip_wire_sigma) and not trip_wire_bypass
+        trip_warn = (
+            is_anomalous(trip_info, trip_wire_sigma)
+            and not is_halt(trip_info, trip_wire_sigma)
         )
 
         return render_template(
@@ -1761,7 +1761,8 @@ def advice_dashboard():
             edge_stats=edge_display,
             trip_info=trip_info,
             trip_sigma=trip_wire_sigma,
-            trip_fired=trip_fired,
+            trip_halt=trip_halt,
+            trip_warn=trip_warn,
             trip_bypassed=trip_wire_bypass,
         )
     finally:

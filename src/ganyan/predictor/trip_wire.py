@@ -1,10 +1,21 @@
 """Top-1-probability trip-wire.
 
 Compares today's average top-1 model probability across all races on the
-card against a rolling 90-day baseline.  When the z-score crosses ±2σ
-the system is suspected of being miscalibrated for the day — typically
-because a feature pipeline (AGF, last_six, KGS) hasn't published yet,
-so all horses fall through to a uniform 1/N softmax.
+card against a rolling 90-day baseline.
+
+Asymmetric policy (since 2026-04-30): the failure mode this guard exists
+for is *under*-confidence — feature pipelines (AGF, last_six, KGS) that
+haven't published, dropping every horse to a uniform 1/N softmax. That
+shows up as today's avg top-1 *below* baseline.  *Over*-confidence
+(today's avg above baseline) usually means MORE feature data is
+available than baseline (e.g. a new feature shipped, or the re-predict
+cron is squeezing late-money concentration into the avg).  Different
+phenomenon — worth surfacing, but not worth halting advice over.
+
+So:
+- z < -sigma  → ``halt``: hide page body, demand bypass
+- |z| > sigma → ``anomalous``: surface a soft yellow warning, render anyway
+- otherwise   → ``ok``: small green OK line
 
 Refactored out of the ``ganyan advice`` CLI so the web ``/advice``
 route can call the same baseline math without duplicating the SQL.
@@ -77,3 +88,20 @@ def compute_trip_wire(
         "z_score": (today_avg - baseline_mean) / baseline_std,
         "n_baseline_days": len(daily),
     }
+
+
+def is_halt(trip_info: dict | None, sigma: float = 2.0) -> bool:
+    """Hard-halt when today is *under*-confident vs baseline.
+
+    Asymmetric: only z < -sigma triggers halt.  Over-confident days
+    (z > +sigma) are surfaced via :func:`is_anomalous` as a soft warning.
+    """
+    return trip_info is not None and trip_info["z_score"] < -sigma
+
+
+def is_anomalous(trip_info: dict | None, sigma: float = 2.0) -> bool:
+    """True when today's z-score crosses ±sigma in either direction.
+
+    Includes halt cases — callers branch on :func:`is_halt` first.
+    """
+    return trip_info is not None and abs(trip_info["z_score"]) > sigma

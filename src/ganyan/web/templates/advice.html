@@ -57,14 +57,16 @@
     </div>
 </div>
 
-<!-- Trip-wire — daily top-1-prob z-score sanity check vs 90d baseline -->
+<!-- Trip-wire — daily top-1-prob z-score sanity check vs 90d baseline.
+     Asymmetric policy: hard-halt only when UNDER-confident (z < -sigma);
+     surface a soft warning when OVER-confident (z > +sigma); silent OK
+     line otherwise. -->
 {% if trip_info %}
-    {% if trip_fired %}
+    {% if trip_halt %}
     <div class="alert alert-danger mb-3">
         <strong>⚠️ TRIP-WIRE FIRED</strong> —
-        model is
-        {% if trip_info.z_score > 0 %}<strong>OVER</strong>{% else %}<strong>UNDER</strong>{% endif %}-confident
-        today (z = {{ '%+.2f'|format(trip_info.z_score) }}).
+        model is <strong>UNDER</strong>-confident today
+        (z = {{ '%+.2f'|format(trip_info.z_score) }}).
         <span class="ms-2 small">
             Bugün ort. top-1: <strong>{{ '%.1f'|format(trip_info.today_avg) }}%</strong> ·
             {{ trip_info.n_baseline_days }}d baseline:
@@ -84,6 +86,17 @@
         {{ '%.1f'|format(trip_info.baseline_mean) }}%).
         Operatör manuel olarak devam etmeyi seçti.
     </div>
+    {% elif trip_warn %}
+    <div class="alert alert-info py-2 small mb-3">
+        <strong>Trip-wire notu:</strong> model bugün
+        {% if trip_info.z_score > 0 %}<strong>fazla</strong>{% else %}<strong>az</strong>{% endif %}
+        emin (z = {{ '%+.2f'|format(trip_info.z_score) }};
+        bugün {{ '%.1f'|format(trip_info.today_avg) }}% vs
+        {{ trip_info.n_baseline_days }}d baseline
+        {{ '%.1f'|format(trip_info.baseline_mean) }}% ± {{ '%.1f'|format(trip_info.baseline_std) }}%).
+        Halt etmiyoruz — bu yön (over-confident) feature pipeline'ın bozuk
+        olduğu anlamına gelmez; yine de göz at.
+    </div>
     {% else %}
     <div class="text-muted small mb-3">
         Trip-wire OK · z = {{ '%+.2f'|format(trip_info.z_score) }}
@@ -94,7 +107,7 @@
     {% endif %}
 {% endif %}
 
-{% if not trip_fired %}
+{% if not trip_halt %}
 <!-- Top filter strip — shows what's filtering races right now -->
 <div class="card mb-3 bg-light border-0">
     <div class="card-body py-2 small">
@@ -566,6 +579,6 @@
     </div>
 </div>
 {% endfor %}
-{% endif %}{# /not trip_fired — when the trip-wire is firing the page body is hidden #}
+{% endif %}{# /not trip_halt — UNDER-confident z hides the page body until bypassed #}
 
 {% endblock %}

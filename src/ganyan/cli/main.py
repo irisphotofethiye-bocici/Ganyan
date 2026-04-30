@@ -2125,7 +2125,7 @@ def advice_cmd(
             )
         return None
 
-    from ganyan.predictor.trip_wire import compute_trip_wire
+    from ganyan.predictor.trip_wire import compute_trip_wire, is_anomalous, is_halt
 
     session = get_session()
     try:
@@ -2174,10 +2174,9 @@ def advice_cmd(
             compute_trip_wire(session, target_date, lookback_days=trip_wire_lookback)
             if trip_wire else None
         )
-        if trip_info is not None and abs(trip_info["z_score"]) > trip_wire_sigma:
-            direction = "OVER-confident" if trip_info["z_score"] > 0 else "UNDER-confident"
+        if is_halt(trip_info, trip_wire_sigma):
             typer.echo(
-                f"⚠️  TRIP-WIRE FIRED — model is {direction} today.\n"
+                f"⚠️  TRIP-WIRE FIRED — model is UNDER-confident today.\n"
                 f"  today avg top-1 prob: {trip_info['today_avg']:.1f}%\n"
                 f"  {trip_info['n_baseline_days']}d baseline:    "
                 f"{trip_info['baseline_mean']:.1f}% ± {trip_info['baseline_std']:.1f}%  "
@@ -2186,6 +2185,17 @@ def advice_cmd(
                 f"  → bypass with --no-trip-wire if you've verified the cause."
             )
             return
+        if is_anomalous(trip_info, trip_wire_sigma):
+            # Over-confident — note but don't halt. Could mean a new feature
+            # shipped, the re-predict cron is concentrating late money, or
+            # genuinely a sharper-than-usual card.
+            typer.echo(
+                f"ℹ️  Trip-wire note: model is OVER-confident today "
+                f"(z = {trip_info['z_score']:+.2f}, "
+                f"today {trip_info['today_avg']:.1f}% vs baseline "
+                f"{trip_info['baseline_mean']:.1f}% ± {trip_info['baseline_std']:.1f}%). "
+                f"Continuing — over-confidence isn't the failure mode the trip-wire halts on."
+            )
 
         race_ids = [r.id for r in races]
         picks = (
