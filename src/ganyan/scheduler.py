@@ -141,8 +141,13 @@ def _job_repredict_upcoming(settings: Settings) -> None:
 
     Trigger: every 30 minutes between 11:05 and 20:35 — five minutes
     after each agf_snapshot run so AGF has committed. Skips races that
-    have already resulted, so the work shrinks through the day.
+    have already resulted *and* races whose post_time has passed (TJK's
+    results-publish often lags the race itself by 30+ minutes; refreshing
+    a pick after the gates open silently rewrites the operator's
+    morning-recorded recommendation, which is the audit-of-record).
     """
+    from datetime import datetime, timedelta
+
     from sqlalchemy import func
 
     from ganyan.db import get_session
@@ -151,10 +156,18 @@ def _job_repredict_upcoming(settings: Settings) -> None:
     from ganyan.predictor.picks import generate_picks_for_race
 
     today = date.today()
-    logger.info("scheduler: repredict-upcoming starting for %s", today)
+    now_local = datetime.now()
+    # Cut-off: don't re-predict races whose post_time is within the next
+    # 5 minutes or already past.  Operator may have placed bets based on
+    # the previous prediction; gates close at post_time.
+    cutoff = (now_local + timedelta(minutes=5)).strftime("%H:%M")
+    logger.info(
+        "scheduler: repredict-upcoming starting for %s (cutoff post_time>%s)",
+        today, cutoff,
+    )
 
     session = get_session()
-    n_repredicted = n_picks = 0
+    n_repredicted = n_picks = n_skipped_late = 0
     try:
         predictor = EnsemblePredictor(session)
         races = (
@@ -167,6 +180,13 @@ def _job_repredict_upcoming(settings: Settings) -> None:
             .having(func.count(RaceEntry.id) >= 3)
             .all()
         )
+        races_kept = []
+        for race in races:
+            if race.post_time and race.post_time <= cutoff:
+                n_skipped_late += 1
+                continue
+            races_kept.append(race)
+        races = races_kept
         for race in races:
             try:
                 predictor.predict_and_save(race.id)
@@ -185,8 +205,9 @@ def _job_repredict_upcoming(settings: Settings) -> None:
         session.close()
 
     logger.info(
-        "scheduler: repredict-upcoming done (%d races re-predicted, %d picks rewritten)",
-        n_repredicted, n_picks,
+        "scheduler: repredict-upcoming done "
+        "(%d races re-predicted, %d picks rewritten, %d skipped post-cutoff)",
+        n_repredicted, n_picks, n_skipped_late,
     )
 
 
