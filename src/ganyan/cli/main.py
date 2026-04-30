@@ -1971,8 +1971,9 @@ def advice_cmd(
         help="Bayes top-1 5th-percentile threshold (0-1). Skip race if below.",
     ),
     bayes_posterior: str = typer.Option(
-        "models/bayes_pl_v1", "--bayes-posterior",
-        help="Path base (no suffix) to .nc/.indices.json posterior files.",
+        "models/bayes_pl_v3", "--bayes-posterior",
+        help="Path base (no suffix) to .nc/.indices.json posterior files. "
+             "Default v3 (track-variant speed figures, +0.64pp top-1 vs v1).",
     ),
     trip_wire: bool = typer.Option(
         True, "--trip-wire/--no-trip-wire",
@@ -2307,6 +2308,11 @@ def advice_cmd(
                         "bayes_top1_hi95": bayes_top.hi_95 if bayes_top else None,
                     })
                     continue
+            kelly_mult_eff = kelly_fraction
+            bayes_conf = None
+            if bayes_top is not None:
+                bayes_conf = max(0.0, min(1.0, (bayes_top.mean_prob - 0.35) / 0.15))
+                kelly_mult_eff = kelly_fraction * (0.5 + 0.5 * bayes_conf)
             pick_data = {}
             for strat, p in rpicks.items():
                 prob = float(p.model_prob_pct) if p.model_prob_pct else 0.0
@@ -2322,12 +2328,14 @@ def advice_cmd(
                         b=stats.avg_b,
                         bankroll_tl=bankroll,
                         base_stake_tl=stake,
-                        kelly_multiplier=kelly_fraction,
+                        kelly_multiplier=kelly_mult_eff,
                     )
                 pick_data[strat] = {
                     "combination_names": p.combination_names,
                     "stake_tl": stake,
                     "kelly_suggested_tl": round(kelly_tl, 2) if kelly_tl is not None else None,
+                    "kelly_multiplier_effective": round(kelly_mult_eff, 4),
+                    "bayes_confidence": round(bayes_conf, 3) if bayes_conf is not None else None,
                     "model_prob_pct": prob,
                     "calibrated_prob_pct": calibrated_pct,
                     "graded": p.graded,
@@ -2422,11 +2430,16 @@ def advice_cmd(
         header = (f"{track:<10} R{race.race_number:<2} {post}  "
                   f"{race.distance_meters or 0}m{status_badge}")
         typer.echo(header)
+        kelly_mult_eff = kelly_fraction
+        bayes_conf = None
         if bayes_top is not None:
+            bayes_conf = max(0.0, min(1.0, (bayes_top.mean_prob - 0.35) / 0.15))
+            kelly_mult_eff = kelly_fraction * (0.5 + 0.5 * bayes_conf)
             typer.echo(
                 f"  bayes top-1: {bayes_top.horse_name[:22]:<22} "
                 f"{bayes_top.mean_prob:.0%} "
-                f"[{bayes_top.lo_5:.0%}–{bayes_top.hi_95:.0%}]"
+                f"[{bayes_top.lo_5:.0%}–{bayes_top.hi_95:.0%}]  "
+                f"conf={bayes_conf:.2f} → kelly×{kelly_mult_eff:.2f}"
             )
 
         race_had_hit = False
@@ -2489,7 +2502,7 @@ def advice_cmd(
                     b=stats.avg_b,
                     bankroll_tl=bankroll,
                     base_stake_tl=stake,
-                    kelly_multiplier=kelly_fraction,
+                    kelly_multiplier=kelly_mult_eff,
                 )
                 if suggested <= 0:
                     kelly_label = "  kelly: skip"
