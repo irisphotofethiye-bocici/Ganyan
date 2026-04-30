@@ -130,17 +130,19 @@
                 <strong>Strateji → TJK bahis türü</strong>
                 <table class="table table-sm mt-1 mb-2">
                     <tbody>
-                        <tr><td><code>uclu_top1</code></td><td>Sıralı Üçlü Bahis (tek kombinasyon)</td><td class="text-end text-danger">min 20 TL</td></tr>
-                        <tr><td><code>uclu_box6</code></td><td>Sıralı Üçlü Bahis + aynı 3 atı 3 sütuna seç (Kutu 6)</td><td class="text-end">min ~12 TL</td></tr>
-                        <tr><td><code>sirali_ikili_top1</code></td><td>Sıralı İkili Bahis (tek kombinasyon)</td><td class="text-end">min ~2 TL</td></tr>
+                        <tr><td><code>uclu_top1</code></td><td>Sıralı Üçlü Bahis (tek kombinasyon, K kapalı)</td><td class="text-end">min 2 TL</td></tr>
+                        <tr><td><code>uclu_box6</code></td><td>Sıralı Üçlü Bahis <strong>(K)</strong> — 3 atı seç + K aç (Komple)</td><td class="text-end">min 12 TL</td></tr>
+                        <tr><td><code>sirali_ikili_top1</code></td><td>Sıralı İkili Bahis (tek kombinasyon)</td><td class="text-end">min 1 TL</td></tr>
                         <tr><td><code>ganyan_top1</code></td><td>Ganyan (sadece referans)</td><td class="text-end">min 1 TL</td></tr>
                     </tbody>
                 </table>
-                <strong>Bilet slip widget'ları — tuzaklar</strong>
+                <strong>Bilet slip widget'ları — düzeltilmiş (2026-04-30)</strong>
                 <ul class="mb-0">
-                    <li><strong>K toggle (yeşil):</strong> <span class="text-danger">Komple</span> — sahadaki tüm atları o sütuna ekler. <strong>KUTU DEĞİL.</strong> Dokunma.</li>
-                    <li><strong>Kutu:</strong> Ayrı buton yok. Aynı 3 atı 3 sütuna seçince sistem otomatik 6 permütasyona indirger.</li>
-                    <li><strong>Bahis sayısı:</strong> pre-bet = benzersiz kombinasyon; post-bet = kombinasyon × misli.</li>
+                    <li><strong>K toggle (yeşil = açık):</strong> <span class="text-success"><strong>Kombine Komple</strong></span> — seçtiğin <em>kendi</em> atların tüm permütasyonlarını otomatik üretir. 3 at + K → 6 bilet, 4 at + K → 24 bilet.  <strong>uclu_box6 için ZORUNLU</strong>.  (Eski not "tüm sahayı ekler" yanlıştı.)</li>
+                    <li><strong>uclu_top1 (tek sıra):</strong> 3 atı sırayla 3 sütuna yaz, K <strong>kapalı</strong>. 1 bilet.</li>
+                    <li><strong>uclu_box6 (Komple):</strong> 3 atı seç, K <strong>açık</strong>. 6 bilet (3!).  Onayla diyaloğunda bahis türü <code>Sıralı Üçlü Bahis (K)</code> görünmeli — "(K)" eki Komple aktif demektir.</li>
+                    <li><strong>Bahis sayısı:</strong> pre-bet = benzersiz kombinasyon (6 / 24 / etc.); post-bet = kombinasyon × misli.</li>
+                    <li><strong>Birim fiyat Sıralı Üçlü = 2 ₺/bilet</strong> (1 ₺ değil — bu rakamı bazı eski makalelerde yanlış görüyoruz).  uclu_box6 minimum: 6 × 2 × Misli=1 = 12 ₺.</li>
                 </ul>
             </div>
             <div class="col-md-6">
