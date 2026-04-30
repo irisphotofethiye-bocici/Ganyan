@@ -1,26 +1,29 @@
 {% extends "base.html" %}
-{% block title %}Picks ledger{% endblock %}
+{% block title %}Bahis Defteri{% endblock %}
 
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
-    <h2>Picks Ledger</h2>
-    <a href="/live" class="btn btn-outline-primary btn-sm">Live →</a>
+    <h2>Bahis Defteri</h2>
+    <a href="/live" class="btn btn-outline-primary btn-sm">Canlı →</a>
 </div>
 
 <div class="small text-muted mb-3">
-    Every strategy-level pick the system recommended, with real-world
-    hit/miss + TL P&amp;L once the race resolved.  Races where TJK
-    didn't publish a payout for the pool are excluded from the counts —
-    you couldn't have placed that bet in the first place.
+    Sistemin önerdiği her strateji-bazlı bahis, koşu sonuçlandığında
+    isabet/ıska bilgisi ve TL kar/zarar ile birlikte. TJK'nın havuz
+    ödemesi yayınlamadığı koşular sayımdan hariç tutulur — zaten
+    o bahsi oynayamazdınız.
 </div>
 
-<div class="alert alert-info small mb-4">
-    <strong>Neden Üçlü vurma oranı düşük ama kâr pozitif?</strong>
-    Hit oranı tek başına yanıltıcıdır.  Ganyan'da her 10 yarışın ~4'ünde
-    kazanırsın ama kazançlar küçük (ortalama ~2 TL / 1 TL), takeout
-    sonrası uzun vadede kaybedersin.  Üçlü'de her 23 yarışın sadece
-    birinde kazanırsın ama kazanç büyük (~100 TL / 1 TL).  Uzun vadede
-    belirleyici olan <strong>ROI</strong>'dır, vurma oranı değil.
+<div class="alert alert-warning small mb-4">
+    <strong>Birim düzeltmesi (2026-04-30):</strong>
+    TJK'nın <code>uclu_payout_tl</code> alanı varsayılan 2 ₺ birim üzerinden
+    <em>bilet başına</em> ödemeyi yayınlar — TL başına değil.  Eski grader
+    bu bölmeyi atladığı için Sıralı Üçlü kazançları 2× şişiyordu;
+    operatörün gerçek 30 Nisan Ankara R8 bileti (192 ₺ → 370 ₺) bu hatayı
+    ortaya çıkardı.  Defter geriye dönük düzeltildi: <strong>uclu_top1
+    %−31.9</strong>, <strong>uclu_box6 %−32.0</strong> — yani Üçlü
+    şu anda takeout tabanında, pozitif edge yok.  Birincil metrik
+    <strong>top-1 isabet oranı</strong>'dır; ROI ikincildir.
 </div>
 
 
@@ -43,18 +46,18 @@
                     ROI {{ '%+.1f'|format(row.roi_pct) }}%
                 </div>
                 <div class="small text-muted">
-                    {{ row.n }} bet{{ '' if row.n == 1 else 's' }} ·
-                    {{ row.hits }} hit{{ '' if row.hits == 1 else 's' }}
+                    {{ row.n }} bahis ·
+                    {{ row.hits }} isabet
                     ({{ '%.1f'|format(row.hit_rate_pct) }}%)
                 </div>
                 <div class="small mt-1">
-                    Stake: {{ '{:,.0f}'.format(row.stake_tl) }} TL ·
-                    Payout: {{ '{:,.0f}'.format(row.payout_tl) }} TL ·
+                    Yatırım: {{ '{:,.0f}'.format(row.stake_tl) }} TL ·
+                    Ödeme: {{ '{:,.0f}'.format(row.payout_tl) }} TL ·
                     Net: <strong class="{% if row.net_tl > 0 %}text-success{% elif row.net_tl < 0 %}text-danger{% endif %}">{{ '{:+,.0f}'.format(row.net_tl) }} TL</strong>
                 </div>
                 {% if row.hits > 0 %}
                 <div class="small text-muted">
-                    Hit başına ortalama kazanç:
+                    İsabet başına ortalama kazanç:
                     <strong>{{ '{:,.0f}'.format(row.payout_tl / row.hits) }} TL</strong>
                 </div>
                 {% endif %}
@@ -63,25 +66,25 @@
     </div>
     {% else %}
     <div class="col-12">
-        <div class="alert alert-info">No picks in the ledger yet.</div>
+        <div class="alert alert-info">Bahis defterinde henüz kayıt yok.</div>
     </div>
     {% endfor %}
 </div>
 
 <!-- Recent picks -->
-<h4>Recent 200 picks</h4>
+<h4>Son 200 bahis</h4>
 <div class="table-responsive">
     <table class="table table-sm align-middle">
         <thead class="table-dark">
             <tr>
-                <th>Generated</th>
-                <th>Race</th>
-                <th>Strategy</th>
-                <th>Combination</th>
+                <th>Üretildi</th>
+                <th>Koşu</th>
+                <th>Strateji</th>
+                <th>Kombinasyon</th>
                 <th class="text-end">Model%</th>
-                <th class="text-end">Stake</th>
-                <th class="text-center">Result</th>
-                <th class="text-end">Payout</th>
+                <th class="text-end">Yatırım</th>
+                <th class="text-center">Sonuç</th>
+                <th class="text-end">Ödeme</th>
                 <th class="text-end">Net</th>
             </tr>
         </thead>
@@ -116,9 +119,9 @@
                 <td class="text-end small">{{ '%.0f'|format(p.stake_tl) }} TL</td>
                 <td class="text-center">
                     {% if not p.graded %}
-                        <span class="badge bg-secondary">pending</span>
+                        <span class="badge bg-secondary">beklemede</span>
                     {% elif p.hit %}
-                        <span class="badge bg-success">✓ HIT</span>
+                        <span class="badge bg-success">✓ İSABET</span>
                     {% else %}
                         <span class="badge bg-danger">✗</span>
                     {% endif %}
