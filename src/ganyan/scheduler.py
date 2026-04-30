@@ -60,7 +60,7 @@ def _job_morning_card(settings: Settings) -> None:
     from ganyan.scraper import TJKClient, parse_race_card
     from ganyan.scraper.backfill import log_scrape, store_race_card
     from ganyan.db.models import ScrapeStatus
-    from ganyan.predictor.ml import MLPredictor
+    from ganyan.predictor.ml.ensemble import EnsemblePredictor
     from sqlalchemy import func
 
     today = date.today()
@@ -100,7 +100,7 @@ def _job_morning_card(settings: Settings) -> None:
     try:
         from ganyan.predictor.picks import generate_picks_for_race
 
-        predictor = MLPredictor(session)
+        predictor = EnsemblePredictor(session)
         races = (
             session.query(Race).join(RaceEntry)
             .filter(Race.date == today)
@@ -126,6 +126,67 @@ def _job_morning_card(settings: Settings) -> None:
     logger.info(
         "scheduler: morning-card done (%d races scraped, %d picks written)",
         count, picks_created,
+    )
+
+
+def _job_repredict_upcoming(settings: Settings) -> None:
+    """Re-predict every still-upcoming race today using current AGF.
+
+    Background: morning_card runs once at 08:30, before AGF is published.
+    LGBM with NULL agf/last_six features falls through to uniform 1/N
+    softmax, so every horse gets the same probability and the picks are
+    just gate-ordered fallbacks. AGF is first scraped at 11:00 (the
+    agf_snapshot job), so any race that posts after AGF settles needs
+    its prediction redone before its post time.
+
+    Trigger: every 30 minutes between 11:05 and 20:35 — five minutes
+    after each agf_snapshot run so AGF has committed. Skips races that
+    have already resulted, so the work shrinks through the day.
+    """
+    from sqlalchemy import func
+
+    from ganyan.db import get_session
+    from ganyan.db.models import Race, RaceEntry, RaceStatus
+    from ganyan.predictor.ml.ensemble import EnsemblePredictor
+    from ganyan.predictor.picks import generate_picks_for_race
+
+    today = date.today()
+    logger.info("scheduler: repredict-upcoming starting for %s", today)
+
+    session = get_session()
+    n_repredicted = n_picks = 0
+    try:
+        predictor = EnsemblePredictor(session)
+        races = (
+            session.query(Race).join(RaceEntry)
+            .filter(
+                Race.date == today,
+                Race.status != RaceStatus.resulted,
+            )
+            .group_by(Race.id)
+            .having(func.count(RaceEntry.id) >= 3)
+            .all()
+        )
+        for race in races:
+            try:
+                predictor.predict_and_save(race.id)
+                picks = generate_picks_for_race(
+                    session, race.id, refresh=True,
+                )
+                n_repredicted += 1
+                n_picks += len(picks)
+                session.commit()
+            except Exception:  # noqa: BLE001
+                session.rollback()
+                logger.exception(
+                    "scheduler: repredict failed for race %s", race.id,
+                )
+    finally:
+        session.close()
+
+    logger.info(
+        "scheduler: repredict-upcoming done (%d races re-predicted, %d picks rewritten)",
+        n_repredicted, n_picks,
     )
 
 
@@ -390,6 +451,23 @@ def _add_jobs(scheduler, settings: Settings) -> None:
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        _job_repredict_upcoming,
+        # 5 min after each agf_snapshot — gives AGF time to commit, then
+        # re-predicts every still-upcoming race so post-08:30 picks no
+        # longer ride a uniform 1/N fallback.
+        CronTrigger(
+            minute="5,35",
+            hour="11-20",
+            timezone=_TZ,
+        ),
+        args=[settings],
+        id="repredict_upcoming",
+        name="Re-predict still-upcoming races with current AGF",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=600,
     )
     scheduler.add_job(
         _job_pedigree_refresh,
