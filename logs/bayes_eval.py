@@ -42,11 +42,16 @@ def main():
         from ganyan.predictor.speed_figures import (
             build_horse_speed_history, compute_track_variants, horse_speed_score,
         )
+        from ganyan.predictor.workouts import (
+            build_horse_workout_history, horse_workout_score,
+        )
         print("Building speed-figure history (variants + per-horse) …")
         variants = compute_track_variants(s, to_date=td)
         speed_history = build_horse_speed_history(s, variants, to_date=td)
+        workout_history = build_horse_workout_history(s, to_date=td)
         print(f"  variants: {len(variants)} (track,bucket,date) cells; "
-              f"horses with speed history: {len(speed_history)}")
+              f"horses with speed history: {len(speed_history)}; "
+              f"horses with workouts: {len(workout_history)}")
 
         races = s.execute(
             select(Race).where(Race.date >= fd, Race.date <= td)
@@ -90,6 +95,10 @@ def main():
                 "last_sixes": [e.last_six or "" for e in r.entries],
                 "speeds": [
                     horse_speed_score(speed_history, e.horse_id, r.date) or 0.0
+                    for e in r.entries
+                ],
+                "workouts": [
+                    horse_workout_score(workout_history, e.horse_id, r.date) or 0.0
                     for e in r.entries
                 ],
             }

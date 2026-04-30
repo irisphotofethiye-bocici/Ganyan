@@ -2030,6 +2030,7 @@ def advice_cmd(
 
     bayes_idata = bayes_frame = None
     bayes_speed_history = None
+    bayes_workout_history = None
     bayes_posterior_path = _Path(bayes_posterior)
     if bayes_skip:
         nc_file = bayes_posterior_path.with_suffix(".nc")
@@ -2087,6 +2088,12 @@ def advice_cmd(
             from ganyan.predictor.speed_figures import horse_speed_score
             race_in["speeds"] = [
                 horse_speed_score(bayes_speed_history, e.horse_id, race.date) or 0.0
+                for e in entries
+            ]
+        if bayes_workout_history is not None:
+            from ganyan.predictor.workouts import horse_workout_score
+            race_in["workouts"] = [
+                horse_workout_score(bayes_workout_history, e.horse_id, race.date) or 0.0
                 for e in entries
             ]
         try:
@@ -2165,9 +2172,13 @@ def advice_cmd(
             from ganyan.predictor.speed_figures import (
                 build_horse_speed_history, compute_track_variants,
             )
+            from ganyan.predictor.workouts import build_horse_workout_history
             variants = compute_track_variants(session, to_date=target_date)
             bayes_speed_history = build_horse_speed_history(
                 session, variants, to_date=target_date,
+            )
+            bayes_workout_history = build_horse_workout_history(
+                session, to_date=target_date,
             )
         edge_stats = strategy_edge_stats(
             session,

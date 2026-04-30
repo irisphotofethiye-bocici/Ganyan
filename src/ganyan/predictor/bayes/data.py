@@ -44,6 +44,9 @@ class TrainingFrame:
     # prior runs (lower = faster).  0.0 = no prior history (within-race
     # mean after z-score, so contributes 0 to PL score).
     speed_of_horse_in_race: List[float] = field(default_factory=list)
+    # Workout sec-per-meter, recency-mean of last N prior workouts.
+    # 0.0 = horse has no recorded workouts (cold-start).
+    workout_of_horse_in_race: List[float] = field(default_factory=list)
 
 
 def summarize_last_six(s: str | None) -> float:
@@ -86,6 +89,7 @@ def matrices_for_pymc(frame: TrainingFrame):
     s20_z_mat = np.zeros((R, K_max), dtype="float64")
     last6_z_mat = np.zeros((R, K_max), dtype="float64")
     speed_z_mat = np.zeros((R, K_max), dtype="float64")
+    workout_z_mat = np.zeros((R, K_max), dtype="float64")
     track_dist_arr = np.zeros(R, dtype="int64")
 
     has_jockey = len(frame.jockey_of_horse_in_race) > 0
@@ -95,6 +99,7 @@ def matrices_for_pymc(frame: TrainingFrame):
     has_s20 = len(frame.s20_of_horse_in_race) > 0
     has_last6 = len(frame.last6_of_horse_in_race) > 0
     has_speed = len(frame.speed_of_horse_in_race) > 0
+    has_workout = len(frame.workout_of_horse_in_race) > 0
 
     def _zscore(slice_arr: np.ndarray) -> np.ndarray:
         std = slice_arr.std()
@@ -138,6 +143,11 @@ def matrices_for_pymc(frame: TrainingFrame):
                 frame.speed_of_horse_in_race[flat_idx : flat_idx + n],
                 dtype="float64",
             ))
+        if has_workout:
+            workout_z_mat[r, :n] = _zscore(np.asarray(
+                frame.workout_of_horse_in_race[flat_idx : flat_idx + n],
+                dtype="float64",
+            ))
         valid_mask[r, :n] = True
         flat_idx += n
 
@@ -158,6 +168,7 @@ def matrices_for_pymc(frame: TrainingFrame):
         "s20_z_mat": s20_z_mat,
         "last6_z_mat": last6_z_mat,
         "speed_z_mat": speed_z_mat,
+        "workout_z_mat": workout_z_mat,
         "valid_mask": valid_mask,
         "horse_to_sire": horse_to_sire,
     }
@@ -175,6 +186,7 @@ def build_training_frame(
     to_date: date,
     min_field_size: int = 3,
     include_speed: bool = True,
+    include_workouts: bool = True,
 ) -> TrainingFrame:
     """Build a per-race ordered frame for PL training.
 
@@ -182,6 +194,12 @@ def build_training_frame(
     adjusted seconds-per-meter per horse using the entire DB history up
     through ``to_date`` (variants computed from winners only) and feeds
     a recency-mean per entry as the ``speed_of_horse_in_race`` signal.
+
+    When ``include_workouts`` is True, pre-computes recent-workouts
+    sec-per-meter per horse from the ``tjk_workouts`` external_signals.
+    Returns 0.0 (within-race mean after z-score) for horses without
+    prior recorded workouts — useful since workout coverage was tiny
+    as of 2026-04-30 (only 4 days of ingestion).
     """
     frame = TrainingFrame()
     _intern(frame.sire_index, "")
@@ -195,6 +213,11 @@ def build_training_frame(
         speed_history = build_horse_speed_history(
             session, variants, to_date=to_date,
         )
+
+    workout_history = None
+    if include_workouts:
+        from ganyan.predictor.workouts import build_horse_workout_history
+        workout_history = build_horse_workout_history(session, to_date=to_date)
 
     races = session.execute(
         select(Race).where(
@@ -219,6 +242,7 @@ def build_training_frame(
         s20s: List[float] = []
         last6s: List[float] = []
         speeds: List[float] = []
+        workouts: List[float] = []
         for e in finishers:
             horse_ids.append(_intern(frame.horse_index, e.horse_id))
             jockey_ids.append(_intern(frame.jockey_index, e.jockey))
@@ -234,6 +258,12 @@ def build_training_frame(
                 speeds.append(spm if spm is not None else 0.0)
             else:
                 speeds.append(0.0)
+            if workout_history is not None:
+                from ganyan.predictor.workouts import horse_workout_score
+                w = horse_workout_score(workout_history, e.horse_id, r.date)
+                workouts.append(w if w is not None else 0.0)
+            else:
+                workouts.append(0.0)
         track_dist = (r.track_id, distance_bucket_for(r.distance_meters or 0))
         frame.track_dist_of_race[r.id] = _intern(frame.track_dist_index, track_dist)
         frame.orderings[r.id] = horse_ids
@@ -244,5 +274,6 @@ def build_training_frame(
         frame.s20_of_horse_in_race.extend(s20s)
         frame.last6_of_horse_in_race.extend(last6s)
         frame.speed_of_horse_in_race.extend(speeds)
+        frame.workout_of_horse_in_race.extend(workouts)
 
     return frame
