@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from dataclasses import dataclass, field
 from datetime import date as date_type
+from datetime import datetime, timezone
 from pathlib import Path
 
 import lightgbm as lgb
@@ -25,6 +27,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_DIR = Path(__file__).resolve().parents[3].parent / "models"
 DEFAULT_MODEL_BASENAME = "lightgbm_ranker"
+
+
+def _git_sha() -> str | None:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+        return out.strip() or None
+    except (subprocess.SubprocessError, OSError):
+        return None
 
 _DEFAULT_LGBM_PARAMS: dict = {
     "objective": "lambdarank",
@@ -171,7 +187,9 @@ def cross_validate_ranker(
             valid_names=["train", "test"],
             callbacks=[
                 lgb.early_stopping(
-                    stopping_rounds=early_stopping_rounds, verbose=False,
+                    stopping_rounds=early_stopping_rounds,
+                    verbose=False,
+                    first_metric_only=False,
                 ),
                 lgb.log_evaluation(period=0),
             ],
@@ -651,7 +669,9 @@ def train_ranker(
                 )
                 callbacks.append(
                     lgb.early_stopping(
-                        stopping_rounds=early_stopping_rounds, verbose=False,
+                        stopping_rounds=early_stopping_rounds,
+                        verbose=False,
+                        first_metric_only=False,
                     ),
                 )
     else:
@@ -673,7 +693,9 @@ def train_ranker(
             )
             callbacks.append(
                 lgb.early_stopping(
-                    stopping_rounds=early_stopping_rounds, verbose=False,
+                    stopping_rounds=early_stopping_rounds,
+                    verbose=False,
+                    first_metric_only=False,
                 ),
             )
     callbacks.append(lgb.log_evaluation(period=0))  # silence per-iter chatter
@@ -740,6 +762,8 @@ def train_ranker(
         "num_boost_round": num_boost_round,
         "best_iteration": booster.best_iteration or num_boost_round,
         "softmax_temperature": temperature,
+        "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "git_sha": _git_sha(),
     }
     meta_path.write_text(json.dumps(metadata, indent=2, default=str))
 

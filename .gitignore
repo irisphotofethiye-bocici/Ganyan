@@ -59,4 +59,7 @@ htmlcov/
 .env
 local_settings.py
 models/bayes_pl_*
+models.bak*/
+logs/*.out
+.claude/
 

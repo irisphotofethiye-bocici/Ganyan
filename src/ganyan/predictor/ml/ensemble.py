@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 from sqlalchemy.orm import Session
 
-from ganyan.db.models import Race
+from ganyan.db.models import Prediction as PredictionRow, Race, RaceEntry
 from ganyan.predictor.bayesian import Prediction
 from ganyan.predictor.ml.features import build_race_frame
 from ganyan.predictor.ml.predictor import (
@@ -343,3 +343,33 @@ class EnsemblePredictor:
                 )
             )
         return out
+
+    def predict_and_save(self, race_id: int) -> list[Prediction]:
+        """Run ``predict_as_predictions`` and persist to RaceEntry +
+        Prediction rows — same contract as ``MLPredictor.predict_and_save``
+        so callers (notably the scheduler's morning_card job) can swap
+        predictors without further changes.
+        """
+        preds = self.predict_as_predictions(race_id)
+        entries = {
+            (e.race_id, e.horse_id): e
+            for e in self.session.query(RaceEntry)
+            .filter(RaceEntry.race_id == race_id)
+            .all()
+        }
+        version = f"ensemble-{len(self.models)}-heads"
+        for p in preds:
+            entry = entries.get((race_id, p.horse_id))
+            if entry is None:
+                continue
+            entry.predicted_probability = p.probability
+            self.session.add(
+                PredictionRow(
+                    race_entry_id=entry.id,
+                    model_version=version,
+                    probability=p.probability,
+                    confidence=p.confidence,
+                    factors=p.contributing_factors,
+                )
+            )
+        return preds

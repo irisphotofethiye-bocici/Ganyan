@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Ganyan Live — {{ target }}{% endblock %}
+{% block title %}Ganyan Canlı — {{ target }}{% endblock %}
 {% block head_extra %}
 <meta http-equiv="refresh" content="30">
 <style>
@@ -14,14 +14,14 @@
 
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-2">
-    <h2>Live — {{ target }}</h2>
-    <div class="small text-muted">refreshes every 30s · {{ now.strftime('%H:%M:%S') }}</div>
+    <h2>Canlı — {{ target }}</h2>
+    <div class="small text-muted">her 30 sn yenilenir · {{ now.strftime('%H:%M:%S') }}</div>
 </div>
 <div class="mb-3 small text-muted">
-    Picks are generated from the stored ML-model win probabilities and
-    Harville joint probabilities.  Stake = 100 TL per ticket per pool.
-    Daily P&amp;L below only counts races where TJK actually published a
-    payout for that pool.
+    Bahisler ML modelinin galibiyet olasılıklarından ve Harville birleşik
+    olasılıklarından üretilir. Yatırım = havuz başına bilet başına 100 TL.
+    Aşağıdaki günlük kar/zarar yalnızca TJK'nın o havuza ödeme yayınladığı
+    koşuları sayar.
 </div>
 
 <!-- Running daily P&L -->
@@ -31,17 +31,16 @@
     <div class="col-md-3">
         <div class="card">
             <div class="card-body py-2">
-                <div class="text-muted small">{{ label }} &nbsp;({{ t.races }} races)</div>
+                <div class="text-muted small">{{ label }} &nbsp;({{ t.races }} koşu)</div>
                 <div class="fs-5">
-                    {{ t.hits }} hit
-                    {% if t.hits == 1 %}{% else %}s{% endif %}
+                    {{ t.hits }} isabet
                     &nbsp;|&nbsp;
                     <span class="{% if t.net > 0 %}text-success{% elif t.net < 0 %}text-danger{% endif %}">
                         {{ '%+.0f'|format(t.net) }} TL
                     </span>
                 </div>
                 <div class="small text-muted">
-                    stake {{ '%.0f'|format(t.stake) }} · payout {{ '%.0f'|format(t.payout) }} ·
+                    yatırım {{ '%.0f'|format(t.stake) }} · ödeme {{ '%.0f'|format(t.payout) }} ·
                     ROI {% if t.roi_pct is not none %}{{ '%+.1f'|format(t.roi_pct) }}%{% else %}—{% endif %}
                 </div>
             </div>
@@ -55,9 +54,9 @@
 <table class="table table-sm align-middle">
     <thead class="table-dark">
         <tr>
-            <th>Post</th>
-            <th>Race</th>
-            <th>Actual 1→2→3</th>
+            <th>Saat</th>
+            <th>Koşu</th>
+            <th>Gerçek 1→2→3</th>
             <th>Ganyan</th>
             <th>İkili</th>
             <th>Sıralı İkili</th>
@@ -71,7 +70,7 @@
             <td class="text-nowrap">
                 {% if race.post_time %}{{ race.post_time }}{% else %}—{% endif %}
                 {% if row.pending %}
-                    <span class="badge bg-secondary">pending</span>
+                    <span class="badge bg-secondary">beklemede</span>
                 {% endif %}
             </td>
             <td class="text-nowrap">
@@ -111,7 +110,7 @@
                         {% elif p.hit is false %}
                             &nbsp;✗
                             {% if p.payout is not none %}
-                                <span class="text-muted">({{ '%.1f'|format(p.payout) }} TL paid)</span>
+                                <span class="text-muted">({{ '%.1f'|format(p.payout) }} TL ödendi)</span>
                             {% endif %}
                         {% endif %}
                     </small>
@@ -122,14 +121,14 @@
             {% endfor %}
         </tr>
         {% else %}
-        <tr><td colspan="7" class="text-muted">No races on {{ target }}.</td></tr>
+        <tr><td colspan="7" class="text-muted">{{ target }} tarihinde koşu yok.</td></tr>
         {% endfor %}
     </tbody>
 </table>
 </div>
 
 <div class="small text-muted mt-3">
-    Variance warning: at ~5% Üçlü hit rate, zero-hit days (−100% daily ROI)
-    happen ~40% of cards.  Only the long run is positive.
+    Varyans uyarısı: ~%5 Üçlü isabet oranında, isabetsiz günler (−%100 günlük ROI)
+    kartların ~%40'ında olur. Yalnızca uzun vade pozitiftir.
 </div>
 {% endblock %}

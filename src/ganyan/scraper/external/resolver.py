@@ -276,15 +276,14 @@ def _name_match(jockey_full: str | None, entry_jockey: str | None) -> bool:
 def bind_discipline_to_entries(
     session: Session, target_date: date_type,
 ) -> int:
-    """Bind reported_jockey / penalized_jockey signals to today's entries.
+    """Bind reported_jockey / penalized_jockey signals to entries.
 
-    Logic: for each unbound discipline row whose active window
-    [start_date, end_date] contains ``target_date``, find every race
-    on ``target_date`` whose jockey field matches the disciplinary
-    name.  One signal row stays per (signal, race_entry) match —
-    if the same disciplined jockey is listed in multiple races we
-    duplicate the signal (one per entry) so feature aggregation can
-    count distinct entries trivially.
+    For each unbound discipline row carrying an active window
+    [start_date, end_date], match every race entry whose race date
+    falls within that window AND whose jockey field matches the
+    disciplinary name.  ``target_date`` is passed for logging/scope
+    only — the bind is window-driven so a row scraped today retro-
+    fits historical races within its window.
 
     Returns total updated/duplicated rows.
     """
@@ -299,21 +298,10 @@ def bind_discipline_to_entries(
     if not candidates:
         return 0
 
-    # Pre-load today's entries with their jockey strings.
-    entries_today = (
-        session.query(RaceEntry, Race)
-        .join(Race, Race.id == RaceEntry.race_id)
-        .filter(Race.date == target_date)
-        .all()
-    )
-    if not entries_today:
-        return 0
-
     n_bound = 0
     n_dup = 0
     for sig in candidates:
         payload = sig.payload or {}
-        # Only bind signals whose active window covers target_date.
         start = payload.get("start_date")
         end = payload.get("end_date")
         try:
@@ -321,14 +309,21 @@ def bind_discipline_to_entries(
             ed = date_type.fromisoformat(end) if end else None
         except ValueError:
             sd = ed = None
-        if sd and target_date < sd:
+        if sd is None and ed is None:
             continue
-        if ed and target_date > ed:
-            continue
+
+        # Pull entries within the window, then filter by jockey.
+        q = session.query(RaceEntry, Race).join(
+            Race, Race.id == RaceEntry.race_id,
+        )
+        if sd is not None:
+            q = q.filter(Race.date >= sd)
+        if ed is not None:
+            q = q.filter(Race.date <= ed)
 
         jockey_full = payload.get("jockey_name")
         matches = [
-            (entry, race) for entry, race in entries_today
+            (entry, race) for entry, race in q.all()
             if _name_match(jockey_full, entry.jockey)
         ]
         if not matches:
@@ -355,7 +350,7 @@ def bind_discipline_to_entries(
 
     session.flush()
     logger.info(
-        "discipline binder: %d primary, %d duplicated rows for %s",
+        "discipline binder: %d primary, %d duplicated rows (target %s)",
         n_bound, n_dup, target_date,
     )
     return n_bound + n_dup

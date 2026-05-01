@@ -294,6 +294,9 @@ def train_conditional_logit(
         "n_races": n_test,
         "final_nll": best_loss,
     }
+    from ganyan.predictor.ml.trainer import _git_sha
+    from datetime import datetime, timezone
+
     metadata = {
         "model_family": "plackett_luce" if plackett_luce else "conditional_logit",
         "objective": "rank",  # compatible with ensemble rank-head contract
@@ -304,6 +307,8 @@ def train_conditional_logit(
         "npz_path": npz_path.name,
         "standardisation": {"mean": mean.tolist(), "std": std.tolist()},
         "race_type_prefix": race_type_prefix,
+        "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "git_sha": _git_sha(),
     }
     coefficients = dict(
         sorted(

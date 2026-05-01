@@ -1,32 +1,33 @@
 # 🏇 Ganyan — TJK Yarış Tahmin Sistemi
 
 Türkiye Jokey Kulübü (TJK) yarış verilerini kazır, LightGBM
-LambdaRank tabanlı bir sıralama modeliyle tahmin üretir ve egzotik
-(Üçlü / İkili / Sıralı İkili) havuzlar için **backtest'i pozitif**
-olan bahis stratejilerini otomatik olarak öneri defterine işler.
+LambdaRank ranker'ı + hiyerarşik Bayesian Plackett-Luce modelden
+oluşan iki katmanlı bir tahminciyle olasılık üretir, Harville joint
+probabilities ile egzotik bahis kombinasyonlarını puanlar ve günlük
+"hangi yarışta oyna, hangisini atla" tavsiyeleri çıkarır.
 
-Üçlü Top-1 stratejisi için strict out-of-sample backtest (2026-01-16
-→ 2026-04-19, 1.477 yarış): **+149.5% ROI**. Canlı defter (3.185
-işlemli pick, v3-bayesian döneminden birikmiş): **+50.9% ROI**.
-Detaylar aşağıda — lütfen önce "Dürüst Uyarılar" kısmını okuyun.
+**Birincil metrik — top-1 isabet oranı**, ROI değil. 1.841 graded
+pick'lik canlı defter üzerinde Ganyan top-1 hit %37.6, Sıralı İkili
+top-1 %12.4, Üçlü top-1 %3.9, Üçlü Kutu-6 %13.4. ROI rakamları havuz
+takeout dinamiklerini yansıtır — model kalitesinin doğrudan ölçüsü
+değildir.
 
-2026-04-22 itibarıyla **varsayılan tahminci LightGBM (ml)**; 3 aylık
-veri rescrape'i (EİD / son_6 / KGS / s20 alanları 7-8% → 94-99%
-kapsama) ve modeli yeniden eğitme sonrası tam 3 aylık pencerede
-(2026-01-22 → 2026-04-18, **1.369 yarış**) değerlendirme:
+**Edge retraction (2026-04-30):** İlk üçlü "+583% ROI" rakamı, grader
+sıralı üçlü payoutunu 1 TL birim olarak skorladığı için 2× şişmişti
+— gerçek birim 2 TL bilet başına. Operatörün gerçek bileti (192 TL
+yatırım → 370 TL ödeme) hatayı ortaya çıkardı; defter geriye dönük
+düzeltildi. Düzeltme sonrası gerçek ROI: **uclu_top1 ≈ −32%,
+uclu_box6 ≈ −32%, sirali_ikili_top1 ≈ −13%, ganyan_top1 ≈ −20%** —
+yani egzotik havuzlarda pozitif edge **yok**, sistem takeout
+tabanında. Model hâlâ top-1 doğruluğu için kullanışlı; gerçek para
+bahsi tavsiye edilmez.
 
-- Üçlü Top-1: **+583.6% full, +452.5% holdout OOS**
-- Üçlü Kutu-6: **+174.6% full, +82.3% holdout OOS**
-- Sıralı İkili Top-1: **+32.0% full, +44.4% holdout OOS**
-- Ganyan Top-1 (referans): -1.7% full
-
-3 betting stratejisinin full pencerede toplam net kârı (100 TL/ticket
-nominal): **+1.056.755 TL kombine net, 571.600 TL kombine stake
-üzerinde — birleşik ROI +184.9%**. (uclu_top1 62.100 + uclu_box6
-372.600 + sirali 136.900 TL stake'lerin toplamı.) Bu "bir yarışa 100
-TL bahis" değil — 3 ay boyunca her uygun yarışta her stratejiye 100
-TL/ticket koyarsanız toplam kümülatif sonuç. Bayesian model (v5-s20)
-`--model bayesian` ile hâlâ erişilebilir fallback olarak kalıyor.
+**Bayes geçit (2026-04-29):** Hierarchical Plackett-Luce posterior'u
+(`models/bayes_pl_v3`) belirsiz yarışları atlamak için filtre olarak
+çalışır. `ganyan advice` ve `/advice` web rotası sadece Bayes top-1
+ortalaması ≥35% **ve** %5 alt sınırı ≥20% olan yarışları geçirir;
+tipik bir günde 18 yarıştan 1-3'ü geçit eşiğini aşar. Detaylar
+aşağıda — lütfen önce "Dürüst Uyarılar" kısmını okuyun.
 
 ---
 
@@ -35,24 +36,39 @@ TL/ticket koyarsanız toplam kümülatif sonuç. Bayesian model (v5-s20)
 Üç servisli monorepo, tümü aynı PostgreSQL veritabanını paylaşır:
 
 ```
-TJK AJAX → scraper/  →  PostgreSQL
-                           │
-                    predictor/ (LightGBM + Harville)
-                           │
-                web/ (Flask + HTMX)     cli/ (Typer)
+TJK AJAX  →  scraper/        →  PostgreSQL
+                                    │
+                          predictor/ (11-head ensemble)
+                          ├─ LightGBM LambdaRank (top-1 ranker)
+                          ├─ Hierarchical Bayesian PL (skip-gate)
+                          ├─ Harville joint probabilities (egzotik)
+                          └─ Cohort filter + trip-wire
+                                    │
+                          picks/ + advice/ ledger
+                                    │
+                  web/ (Flask + HTMX)     cli/ (Typer)
 ```
 
 - **scraper/** — `tjk_api.py` şehir-bazlı yarış programı ve sonuçlarını
   paralel çeker; `parser.py` HTML'i dataclass'a dönüştürür; `backfill.py`
-  idempotent ekleme ve geçmiş veri yükleme.
+  idempotent ekleme ve geçmiş veri yükleme; `external/` klasöründe
+  yarisrehberi tipster, TJK discipline (jokey ceza), workouts (idman
+  istatistikleri), track conditions (pist bilgileri), steward reports
+  (komiser raporları) için pluggable scraper framework'ü.
 - **predictor/** — `features.py` (speed figure, form cycle, weight delta,
   rest fitness, class, AGF, **s20 edge**, soy, ekipman değişikliği vb.),
-  `ml/predictor.py` + `ml/trainer.py` (AGF-farkında LightGBM LambdaRank,
-  **varsayılan tahminci**; AGF-kör value varyantı için `--exclude-agf`),
-  `bayesian.py` (v5-s20 hand-tuned referans), `exotics.py` (Harville joint
-  probabilities), `picks.py` (strateji-bazlı öneri defteri + grading).
+  `ml/ensemble.py` + `ml/predictor.py` + `ml/trainer.py` (AGF-farkında
+  LightGBM LambdaRank ranker, AGF-kör value, ev, finish-time + 7
+  spec-class head, toplam 11-head ensemble), `bayes/` (Hierarchical
+  Plackett-Luce, ADVI fit ile eğitilmiş; mean-field posterior'u skip-gate
+  filtresi olarak çalışır), `exotics.py` (Harville joint probabilities),
+  `picks.py` (strateji-bazlı öneri defteri + grading), `trip_wire.py`
+  (model konfidansının 90-günlük baseline'a göre ±2σ sapmasını izler;
+  asimetrik halt — sadece UNDER-confidence advice üretmeyi durdurur).
 - **web/** + **cli/** — Flask dashboard (HTMX + Bootstrap 5, Türkçe
-  arayüz) ve Typer CLI doğrudan predictor/scraper'ı tüketir.
+  arayüz) ve Typer CLI doğrudan predictor/scraper'ı tüketir; `/advice`,
+  `/picks`, `/live`, `/ops` panoları + `ganyan advice`, `ganyan morning`,
+  `ganyan picks`, `ganyan tune-thresholds` komutları.
 
 ## 🎯 Tahmin Faktörleri
 
@@ -82,9 +98,11 @@ Her özellik için bkz. `src/ganyan/predictor/features.py` ve
 | Rota | Ne gösterir |
 |---|---|
 | `/` | Bugünün kart özeti + hızlı aksiyon butonları |
+| `/advice` | Bayes-geçit + cohort filtreden geçmiş yarışlar için günlük "ne oynayım" tavsiyesi; Kelly kalibreli stake, Harville breakdown, trip-wire banner |
 | `/races/<id>/predict` | Tek yarış için sıralama + **per-race bahis önerileri** (Üçlü Top-1, Kutu-6, Sıralı İkili) |
 | `/live` | Günün tüm yarışlarını canlı izleme — tahmin vs gerçek top-3, 30s auto-refresh, rolling P&L |
-| `/picks` | Strateji defteri — her stratejinin hit oranı, ROI, net TL kâr/zarar |
+| `/picks` | Strateji defteri — her stratejinin hit oranı, ROI, net TL kâr/zarar (top-1 hit oranı birincil metrik) |
+| `/history` | Geçmiş yarış-bazlı tahmin vs sonuç defteri |
 | `/ops` | Scheduler job-run geçmişi, data-freshness, sağlık durumu |
 | `/ops/health` | JSON health check (200 ok / 503 degraded) |
 
@@ -94,13 +112,17 @@ Her özellik için bkz. `src/ganyan/predictor/features.py` ve
 
 ```bash
 uv run ganyan races --today                     # bugünün kartı
-uv run ganyan predict <race_id>                 # tek yarış (varsayılan: ml)
+uv run ganyan predict <race_id>                 # tek yarış (varsayılan: ensemble)
 uv run ganyan predict --today --json            # tüm günün tahminleri
-uv run ganyan predict --model bayesian <race>   # hand-tuned Bayesian fallback
+uv run ganyan advice                            # bugünün Bayes-geçit + Kelly tavsiyeleri
+uv run ganyan advice --no-cohort-filter         # cohort filtresini kapat
+uv run ganyan advice --bayes-min-prob 0.30      # geçit eşiğini gevşet
+uv run ganyan morning                           # tek-atışta scrape + predict + picks
 uv run ganyan uclu-picks --date 2026-04-21      # Üçlü Top-1 önerileri
 uv run ganyan picks --grade                     # bekleyen pick'leri grade et
 uv run ganyan picks --since 2026-04-01          # canlı ROI defteri
-uv run ganyan exotics-backtest --from 2026-01-16  --model ml  # backtest
+uv run ganyan tune-thresholds                   # ledger üzerinde min-prob arar
+uv run ganyan exotics-backtest --from 2026-01-16 --model ml  # backtest
 uv run ganyan scrape --today                    # bugünün programı
 uv run ganyan scrape --results                  # sonuçlar
 uv run ganyan scrape --backfill --rescrape \    # geçmiş veriyi (re-)scrape et
@@ -176,6 +198,9 @@ Detaylar ve headless varyant için bkz. [`ops/README.md`](ops/README.md).
 | ID | Zaman | Ne yapar |
 |---|---|---|
 | `morning_card` | 08:30 | Günün programını kazır, her yarışa tahmin + pick üretir |
+| `agf_snapshot` | 11:30 sonrası | AGF değerleri yayınlanınca pick'leri yeniden üretir (sabah AGF=NULL) |
+| `re_predict_upcoming` | Her 30 dk | Henüz başlamamış yarışları yeniden tahmin eder; başlamış yarışların pick'i frozen |
+| `external_signals` | Sabah erken | Tipster + ceza + workout + pist + komiser plugin'lerini çalıştırır |
 | `results_poll` | Her 20 dk, 13:00–23:59 | Sonuçları çeker, bekleyen pick'leri grade eder |
 | `pedigree_refresh` | Pazar 03:00 | Yeni atlar için soy verisi çeker |
 | `monthly_retrain` | Ayın 1'i 03:30 | Her iki modeli de 90-günlük pencereyle yeniden eğitir |
@@ -187,89 +212,91 @@ yazılır ve macOS bildirim balonu çıkar (`osascript`).
 
 ## 📈 Strateji Defteri (`/picks`)
 
-Her yarış için 4 strateji kaydedilir; `ganyan picks` CLI çıktısı
-**Betting** (gerçek P&L) ve **Reference** (gösterim amaçlı, bahse
-girmiyoruz) olarak ikiye ayrılır.
+Her yarış için 4 strateji kaydedilir. **Birincil metrik top-1 isabet
+oranıdır**, ROI değil — payout TJK havuz dinamiklerini (takeout,
+"devren" carry-over, retail davranış) yansıtır, model kalitesini değil.
 
-| Strateji | Stake | Ne | Train ROI (1066 yarış) | **Holdout ROI (303 yarış)** | Full 3-ay ROI (1369 yarış) | Sınıf |
-|---|---|---|---|---|---|---|
-| `uclu_top1` | 100 TL | Harville Üçlü Top-1 | +619.3% | **+452.5%** | +583.6% | Betting |
-| `uclu_box6` | 600 TL | Aynı top-3'ün 6 kutu permütasyonu | +199.7% | **+82.3%** | +174.6% | Betting |
-| `sirali_ikili_top1` | 100 TL | Harville Sıralı İkili Top-1 | +28.5% | **+44.4%** | +32.0% | Betting |
-| `ganyan_top1` | 100 TL | Ganyan Top-1 (modelin favorisi) | +0.1% | -7.8% | -1.7% | Referans |
+**Canlı defter (1.841 graded pick, post-birim-fix):**
 
-Yukarıdaki ROI'lar **yeniden eğitilen LightGBM ranker (ml-new)** ile
-tam 3 aylık pencerede (2026-01-22 → 2026-04-18, 1.504 yarış, 1.369
-tanesi tam top-3 sonuçlu) hesaplandı. Sütunlar: Train (modelin
-öğrendiği 80%), **Holdout (temiz out-of-sample %20)**, Full (ikisi
-birlikte). Üç betting stratejisi aynı anda çalıştırıldığında full
-pencerede kümülatif P&L (100 TL/ticket nominal):
-
-| | Stake | Payout | Net | Birleşik ROI |
+| Strateji | Stake/bilet | Ne | Hit% (top-1) | ROI |
 |---|---|---|---|---|
-| uclu_top1 | 62.100 | 424.510 | +362.410 | |
-| uclu_box6 | 372.600 | 1.023.140 | +650.540 | |
-| sirali_ikili | 136.900 | 180.705 | +43.805 | |
-| **Toplam** | **571.600** | **1.628.355** | **+1.056.755** | **+184.9%** |
+| `ganyan_top1` | 100 TL | Ganyan Top-1 (modelin favorisi) | **37.6%** (693/1841) | −19.9% |
+| `sirali_ikili_top1` | 100 TL | Harville Sıralı İkili tek-kombinasyon | 12.4% (229/1841) | −12.6% |
+| `uclu_box6` | 600 TL (6 bilet × 100) | Top-3'ün 6 kutu permütasyonu | 13.4% (114/848) | −32.3% |
+| `uclu_top1` | 100 TL | Harville Üçlü tek-kombinasyon | 3.9% (33/848) | −32.2% |
 
-Not: Bu "100 TL = 285 TL geri dönüş" değil. uclu_top1 tek bilet
-100 TL, %6.1 oranında kazanır; kazanırsanız ortalama ≈5.000 TL
-ödeme, %94 oranında 100 TL'yi kaybedersiniz. Yukarıdaki +584% ROI
-**çok sayıda bahisten sonra** ortalama geri dönüştür. Varyans sert:
-18 yarışlık bir kartta uclu_top1'den sıfır kazanma ihtimali ~%40.
+Top-1 hit %37.6 model kalitesi açısından sağlıklı bir sinyal — alan
+ortalama büyüklüğü ~12 at olduğunda 1/N rastgele baseline %8.3'tür.
+Üçlü ve İkili'deki negatif ROI **havuz takeout tabanı** (~%30-35) ile
+tutarlı; egzotik havuzlarda fiyatlama bozukluğundan kaynaklanan bir
+edge ön çalışmalarda gözlenmişti ama 2026-04-30 birim düzeltmesinden
+sonra artifact olduğu anlaşıldı.
 
-Train-holdout farkına dikkat: uclu_box6 için in-sample +200% /
-OOS +82% — forward beklenti için holdout rakamını kullanın, train
-rakamı verinin bir kısmı modelin gördüğü için şişkindir. Ama
-uclu_top1'in farkı düşük (+619 / +453) ve sirali_ikili'da holdout
-train'den **daha iyi** (+44 / +29) — "gerçek sinyal, ezberlenmiş
-değil" işareti.
+> **Birim düzeltmesi (2026-04-30):** TJK'nın `uclu_payout_tl` alanı
+> bilet başına 2 TL birim üzerinden ödemeyi yayınlar — TL başına
+> değil. Eski grader bu bölmeyi atladığı için Üçlü kazançları 2×
+> şişkin görünüyordu. Operatörün gerçek Ankara R8 bileti
+> (192 TL → 370 TL) tutarsızlığı ortaya çıkardı; defter geriye dönük
+> düzeltildi. Pre-fix README'deki "+583% Üçlü ROI" rakamı geçerli
+> değildir.
 
-Aynı 303 yarışlık holdout pencerede pre-retrain LightGBM +351 / +56
-/ +25 / -16 üretiyor, hand-tuned Bayesian v5-s20 +71 / -8 / -7 / -22
-üretiyor — mevcut edge'in büyük kısmı **doğru tahminci seçimine
-bağlı**.
+**Bayes geçit + Kelly (gerçek-dünya advice akışı):**
+`ganyan advice` ve `/advice` web rotası **Bayes posterior** üzerinden
+yarış filtrelemesi yapar:
 
-Canlı defterdeki tarihsel rakamlar v3-bayesian dönemine ait (sirali
-tarihsel -11% ROI); sınıflandırma ileriye dönük — yeni picks
-ml-new ile üretiliyor.
+- **Cohort filtresi**: Maiden / dişi cohortları, alan ≥ 13, Şanlıurfa
+  ve Bursa hipodromları otomatik atlanır (14 günlük backtest +5,870 TL
+  bias).
+- **Bayes geçit**: Hierarchical PL posterior'unun top-1 ortalaması
+  ≥35% **ve** %5 alt sınırı ≥20% olmazsa yarış atlanır.
+- **Kelly stake**: `base × (0.5 + 0.5 × confidence)` — sınırda
+  yarışlar yarım Kelly, yüksek konfidans tam Kelly.
+- **Trip-wire**: Günlük ortalama top-1 model konfidansı 90-günlük
+  baseline'dan ±2σ saparsa banner gösterilir; **asimetrik** —
+  UNDER-confidence advice üretmeyi durdurur, OVER-confidence sadece
+  uyarı verir (over-confidence feature pipeline bozulduğunun işareti
+  değil; under-confidence olduğunun işaretidir).
 
-`ganyan_top1` referans olarak tutulur — uzun vadede kaybeder ama
-model sağlığını denetlemek ve hit-rate karşılaştırması için
-defterde kalır. Bahis olarak önerilmez.
+Tipik bir günde 18 yarışlık karttan 1-3'ü geçit eşiğini aşar. Eşiği
+gevşetmek için `--bayes-min-prob`, kapatmak için `--no-bayes-skip`.
 
 **Grading kuralı:** TJK'nın o havuz için payout yayınlamadığı
 yarışlar **ledger'dan atlanır**, zarar olarak sayılmaz — bahis zaten
-açılmamış demektir. Bu kuralı kaldırırsanız ROI -30% olarak okunur.
+açılmamış demektir.
 
 ---
 
 ## ⚠️ Dürüst Uyarılar (önemli)
 
-1. **Varyans gerçek.** Üçlü Top-1 ~5% hit oranıyla yaşar. 18 yarışlık
-   bir günde sıfır vurma olasılığı ~40%; 34 yarışlık bir günde ~17%.
-   Art arda 3–5 kart boş geçmesi normaldir. Bankroll 20+ yarışlık
-   kayıp serisini taşıyabilmelidir.
+1. **Pozitif edge yok (2026-04-30 retraction sonrası).** Önceki
+   "+583% Üçlü ROI" rakamı per-bilet birim hatasıydı; düzeltilmiş
+   defterde tüm 4 stratejinin ROI'ı negatif. Sistem **model
+   doğruluğu** (top-1 hit %37.6) için kullanışlıdır; **gerçek bahis**
+   için değil. Model halka açık verilerden ulaşılabilen tüm sinyalleri
+   sömürmüş durumda; yapısal tavan ~%43 top-1 olarak görünüyor.
 
-2. **Ganyan havuzu etkin.** Varyans etmen olarak AGF'yi yenemezsiniz.
+2. **Varyans gerçek.** Üçlü Top-1 ~%4 hit oranıyla yaşar. 18 yarışlık
+   bir günde sıfır vurma olasılığı ~%48; 34 yarışlık bir günde ~%24.
+   Art arda 3–5 kart boş geçmesi normaldir.
+
+3. **Ganyan havuzu etkin.** Varyans etmen olarak AGF'yi yenemezsiniz.
    AGF-kör "value model" takeout tabanını aşamıyor (test edildi).
-   Edge sadece **egzotik havuzların fiyatlama yapısal bozukluğu**
-   üzerinden geliyor.
+   Egzotik havuzlardaki bozukluk hipotezi (uclu_top1 +149%) küçük-N
+   pencerelerde gerçek görünmüştü ama daha geniş N + birim
+   düzeltmesinde takeout tabanına geri döndü.
 
-3. **Canlı defter ≠ strict backtest.** Mevcut defter 2026-01-01 →
-   2026-01-15 aralığını içerir; bu dönem modelin eğitim
-   verisiydi. 2026-04-21'den itibaren her yeni yarış temiz
-   out-of-sample satır ekler.
+4. **Bayes geçit gerçek bir kalite sinyali.** `ganyan advice`'in
+   geçirdiği yarışlarda top-1 hit oranı, geçit-dışı yarışların
+   ortalamasından belirgin yüksek. Geçit "bahis-değer" değil
+   "model-konfidans" filtresi olarak yararlı.
 
-4. **Edge'i neyin bozduğuna dikkat edin:**
-   - 50-pick yuvarlanan pencerede hit oranı %3'ün altına düşerse,
-   - Ortalama Üçlü payout keskin düşerse (piyasa düzelirse),
-   - Aylık ROI trendi negatife dönerse.
+5. **Trip-wire'a güvenin.** Sabah avg top-1 konfidansı 90-günlük
+   baseline'dan +2σ'dan fazla saptığında model overconfident demektir
+   ve genellikle hit oranı altında düşer (2026-05-01 örneği:
+   z=+2.57, model avg %26.3, gerçek hit %23.1 — uyarı doğru çıktı).
+   −2σ ise feature pipeline bozulduğunu gösterir → halt.
 
-   Tek bir -100% gün (olağan, ~40% olasılıkla) ya da bir aylık
-   -50% dip (skew mean-reversion) edge'i çürütmez.
-
-5. **Bu sistem eğitim ve araştırma amaçlıdır.** Gerçek para
+6. **Bu sistem eğitim ve araştırma amaçlıdır.** Gerçek para
    yatırmadan önce bankroll yönetimi, Kelly oranı ve kişisel risk
    toleransınızı ciddiye alın. Yazar herhangi bir finansal sorumluluk
    kabul etmez.
@@ -291,16 +318,24 @@ Ana dosyalar:
 
 ```
 src/ganyan/
-├── scraper/      # tjk_api.py, parser.py, backfill.py
+├── scraper/
+│   ├── tjk_api.py, parser.py, backfill.py
+│   └── external/           # tipster, discipline, workouts, track-cond, steward
 ├── predictor/
 │   ├── features.py         # engineered features (paylaşımlı)
-│   ├── bayesian.py         # v5-s20 hand-tuned referans
+│   ├── bayesian.py         # v5-s20 hand-tuned referans (legacy fallback)
 │   ├── ml/
 │   │   ├── features.py     # LightGBM feature matrisi
 │   │   ├── trainer.py      # eğitim + temporal holdout
-│   │   └── predictor.py    # MLPredictor (varsayılan)
+│   │   ├── predictor.py    # MLPredictor (single-head)
+│   │   ├── ensemble.py     # 11-head ensemble (varsayılan tahminci)
+│   │   └── linear_ranker.py# Plackett-Luce + conditional-logit baselines
+│   ├── bayes/              # Hierarchical Bayesian PL (skip-gate)
+│   │   ├── trainer.py      # ADVI fit + posterior persist
+│   │   └── predictor.py    # credible intervals on top-1 prob
 │   ├── exotics.py          # Harville joint probabilities
 │   ├── picks.py            # strateji defteri + grading
+│   ├── trip_wire.py        # 90-günlük baseline ±2σ asimetrik halt
 │   └── exotic_evaluate.py  # backtest
 ├── db/           # models.py (SQLAlchemy 2.0), session.py
 ├── web/          # app.py, routes.py, templates/
@@ -345,6 +380,41 @@ MIT — `LICENSE` dosyasına bakın.
 
 Proje gerçek tarihlere göre belgelenmiştir. Eski Selenium-tabanlı
 prototip (2025) mevcut mimari için tamamen yeniden yazılmıştır.
+
+- **2026-05-01 — Asimetrik trip-wire**
+  Trip-wire OVER-confidence durumunda halt ETMİYOR — feature pipeline
+  bozulduğunun işareti UNDER-confidence'tır (avg top-1 baseline'dan
+  -2σ). Aynı gün ilk testte z=+2.57 over-confident sinyalde model
+  avg %26.3 vs gerçek hit %23.1 — uyarı doğru, halt yanlış olurdu.
+
+- **2026-04-30 — Üçlü edge retraction**
+  TJK'nın `uclu_payout_tl` alanının bilet başına 2 TL birim üzerinden
+  ödeme yayınladığı keşfedildi (operatörün gerçek 192 TL → 370 TL
+  Ankara R8 bileti tutarsızlığı ortaya çıkardı). Eski grader 1 TL
+  birim varsayıyordu, Üçlü kazançlarını 2× şişiriyordu. Defter
+  geriye dönük düzeltildi: uclu_top1 ROI **+583% → −31.9%**, uclu_box6
+  **+175% → −32.0%**. Picks.py + grading test'leri yamandı; README
+  ve picks panosundaki "Üçlü kâr pozitif" copy retract edildi.
+  Operasyonel sonuç: pozitif edge yok, sistem **takeout tabanında**.
+
+- **2026-04-29 — Hierarchical Bayesian Plackett-Luce**
+  PyMC 5 + ADVI fit ile hiyerarşik PL modeli (jokey/sire/track-dist
+  random effects, AGF informative prior). Vektörize PL loglik ve
+  numerically-stable mask propagation sayesinde 10K yarış 4 dakikada
+  fit. Holdout (1.487 yarış): top-1 %35.2 (LGBM %38.6'dan 3.4pp düşük)
+  ama Brier −%28 ve logL +0.34 nats — LGBM overconfident, Bayes
+  kalibre. Bayes posterior'u **stake sizing + skip-gate** olarak
+  kullanılıyor; LGBM hâlâ point-pick rankerı. `ganyan advice`/`/advice`
+  Bayes top-1 mean ≥%35 + lo₅ ≥%20 eşiğini geçen yarışları kabul eder;
+  Kelly = base × (0.5 + 0.5×conf).
+
+- **2026-04-23 — Cohort filtresi + 11-head ensemble**
+  Maiden / dişi / alan ≥13 / Şanlıurfa / Bursa cohort'ları
+  bias-yüksek; advice CLI'de varsayılan açık. 14 günlük backtest
+  +5,870 TL. Aynı dönemde 11-head LGBM ensemble (rank + value + EV +
+  finish-time + 7 spec-class head) 1-head tahminciyle yer
+  değiştirdi; AGF snapshot'ları, scraper gate parser fix
+  (StartId → SiraId), leakage smoke testleri.
 
 - **2026-04-22 — Rescrape, Bayesian v5-s20, ml-new, default switch**
   Post-hoc audit: Bayesian'ın form/speed/rest factor'leri 85-93%

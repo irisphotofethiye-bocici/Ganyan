@@ -1,37 +1,37 @@
 {% extends "base.html" %}
 
-{% block title %}Ganyan - Gecmis Sonuclar{% endblock %}
+{% block title %}Ganyan - Geçmiş Sonuçlar{% endblock %}
 
 {% block content %}
-<h2>Gecmis Sonuclar</h2>
+<h2>Geçmiş Sonuçlar</h2>
 
 {% if summary and summary.total_races > 0 %}
 <div class="card mb-4">
     <div class="card-header bg-primary text-white">
-        <strong>Tahmin Degerlendirme Ozeti</strong>
-        <span class="badge bg-light text-primary ms-2">{{ summary.total_races }} yaris</span>
+        <strong>Tahmin Değerlendirme Özeti</strong>
+        <span class="badge bg-light text-primary ms-2">{{ summary.total_races }} koşu</span>
     </div>
     <div class="card-body">
         <div class="row text-center">
             <div class="col-md-2 col-4 mb-3">
                 <div class="fs-3 fw-bold text-success">{{ "%.1f"|format(summary.top1_accuracy) }}%</div>
-                <small class="text-muted">Top-1 Isabeti</small>
+                <small class="text-muted">Top-1 İsabet</small>
             </div>
             <div class="col-md-2 col-4 mb-3">
                 <div class="fs-3 fw-bold text-info">{{ "%.1f"|format(summary.top3_accuracy) }}%</div>
-                <small class="text-muted">Top-3 Isabeti</small>
+                <small class="text-muted">Top-3 İsabet</small>
             </div>
             <div class="col-md-2 col-4 mb-3">
                 <div class="fs-3 fw-bold">{{ "%.2f"|format(summary.avg_winner_rank) }}</div>
-                <small class="text-muted">Ort. Kazanan Sira</small>
+                <small class="text-muted">Ort. Kazanan Sıra</small>
             </div>
             <div class="col-md-2 col-4 mb-3">
                 <div class="fs-3 fw-bold">{{ "%.1f"|format(summary.avg_winner_probability) }}%</div>
-                <small class="text-muted">Ort. Kazanan Olasil.</small>
+                <small class="text-muted">Ort. Kazanan Olasılık</small>
             </div>
             <div class="col-md-2 col-4 mb-3">
                 <div class="fs-3 fw-bold">{{ "%.4f"|format(summary.log_loss) }}</div>
-                <small class="text-muted">Log Loss</small>
+                <small class="text-muted">Log Kayıp</small>
             </div>
             <div class="col-md-2 col-4 mb-3">
                 <div class="fs-3 fw-bold {% if summary.roi_simulation >= 0 %}text-success{% else %}text-danger{% endif %}">
@@ -45,7 +45,7 @@
 {% endif %}
 
 {% if evaluations %}
-<h4>Yaris Bazinda Sonuclar</h4>
+<h4>Koşu Bazında Sonuçlar</h4>
 <div class="table-responsive mb-4">
     <table class="table table-striped table-sm">
         <thead class="table-dark">
@@ -57,7 +57,7 @@
                 <th>At Say.</th>
                 <th>Kazanan</th>
                 <th>Tahmini %</th>
-                <th>Sira</th>
+                <th>Sıra</th>
                 <th>Top-1</th>
                 <th>Top-3</th>
             </tr>
@@ -83,7 +83,7 @@
 {% endif %}
 
 {% if races %}
-<h4>Tum Sonuclanan Yarislar</h4>
+<h4>Tüm Sonuçlanan Koşular</h4>
 <div class="list-group">
     {% for race in races %}
     <a href="/races/{{ race.id }}/predict"
@@ -97,7 +97,12 @@
                 </small>
             </div>
             <div>
-                <span class="badge bg-success">{{ race.status.value }}</span>
+                <span class="badge bg-success">
+                    {% if race.status.value == 'resulted' %}sonuçlandı
+                    {% elif race.status.value == 'scheduled' %}bekliyor
+                    {% elif race.status.value == 'cancelled' %}iptal
+                    {% else %}{{ race.status.value }}{% endif %}
+                </span>
                 <small class="text-muted ms-2">{{ race.date }}</small>
             </div>
         </div>
@@ -106,7 +111,7 @@
 </div>
 {% else %}
 <div class="alert alert-secondary">
-    Henuz sonuclanan yarış bulunamadi.
+    Henüz sonuçlanan yarış bulunamadı.
 </div>
 {% endif %}
 {% endblock %}

@@ -47,7 +47,7 @@
                     <div class="small mb-1">
                         Bilet: <strong>{{ r.tickets }}</strong>
                         ·
-                        Toplam stake: <strong>{{ '%.0f'|format(r.stake_tl) }} TL</strong>
+                        Toplam yatırım: <strong>{{ '%.0f'|format(r.stake_tl) }} TL</strong>
                     </div>
                     <div class="small mb-1">
                         Model olasılığı:
@@ -78,10 +78,10 @@
     <h5 class="text-muted mb-0">Sıralama</h5>
     <small class="text-muted">
         {% if ensemble_by_horse %}
-        Ensemble: <strong>{{ (ensemble_by_horse.values()|list)[0].n_heads }}</strong> head
+        Ansambl: <strong>{{ (ensemble_by_horse.values()|list)[0].n_heads }}</strong> model
         {% endif %}
         {% if drift_by_horse %}
-        · {{ drift_by_horse|length }} at için AGF drift verisi
+        · {{ drift_by_horse|length }} at için AGF değişim verisi
         {% endif %}
     </small>
 </div>
@@ -93,8 +93,8 @@
                 <th>#</th>
                 <th>At</th>
                 <th>Olasılık</th>
-                <th title="Ensemble: rank-1'de hemfikir olan model sayısı">Ensemble</th>
-                <th title="AGF değişimi: gün boyu (latest − earliest)">AGF Drift</th>
+                <th title="Ansambl: rank-1'de hemfikir olan model sayısı">Ansambl</th>
+                <th title="AGF değişimi: gün boyu (son − ilk)">AGF Değişim</th>
                 <th>Güven</th>
                 <th>Etkenler</th>
             </tr>
@@ -178,7 +178,7 @@
 {% if ensemble_by_horse %}
 <details class="mt-3">
     <summary class="text-muted small" style="cursor: pointer;">
-        Per-model olasılık dağılımı (ensemble breakdown) — tıkla
+        Model bazında olasılık dağılımı (ansambl dökümü) — tıkla
     </summary>
     <div class="table-responsive mt-2">
         <table class="table table-sm small">

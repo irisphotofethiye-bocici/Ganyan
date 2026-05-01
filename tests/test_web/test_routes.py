@@ -167,3 +167,52 @@ def test_history_with_evaluations(app_with_results):
     assert data["summary"]["top1_accuracy"] == 100.0
     assert len(data["evaluations"]) == 1
     assert data["evaluations"][0]["winner_name"] == "Winner Horse"
+
+
+def test_scrape_results_post_no_data_redirects(client, monkeypatch):
+    """POST /scrape/results must not 500 when TJK returns no rows."""
+    import ganyan.scraper as scraper_mod
+
+    class _FakeClient:
+        def __init__(self, *_, **__):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def get_race_results(self, _):
+            return []
+
+    monkeypatch.setattr(scraper_mod, "TJKClient", _FakeClient, raising=False)
+
+    response = client.post("/scrape/results")
+    # Either a redirect or a 200 with full context — never 500.
+    assert response.status_code in (200, 302)
+
+
+def test_scrape_results_post_json_no_data(client, monkeypatch):
+    import ganyan.scraper as scraper_mod
+
+    class _FakeClient:
+        def __init__(self, *_, **__):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def get_race_results(self, _):
+            return []
+
+    monkeypatch.setattr(scraper_mod, "TJKClient", _FakeClient, raising=False)
+    response = client.post(
+        "/scrape/results", headers={"Accept": "application/json"},
+    )
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["count"] == 0

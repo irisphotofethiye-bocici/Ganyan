@@ -83,3 +83,79 @@ PostgreSQL 16 via Docker Compose. SQLAlchemy 2.0 ORM + Alembic migrations. Table
 ### Config
 
 `pydantic-settings` reads from `.env` file or environment variables. See `.env.example`. Key: `DATABASE_URL`, `TJK_BASE_URL`, `SCRAPE_DELAY`, `FLASK_PORT`.
+
+### Reporting Conventions
+
+When discussing model or strategy performance, frame around the **winning horse** and **winning bet** — not the payout or ROI.
+
+- **Primary metric**: top-1 hit rate (did we pick the winning horse?)
+- **Secondary**: top-3 hit rate; binary strategy hit rate (`ganyan_top1`, `sirali_ikili_top1`, `uclu_top1`, `uclu_box6`)
+- **Tertiary** (only when sizing strategy or explicitly asked): payout/ROI/net-TL
+
+Payout reflects TJK pool dynamics (takeout, retail behavior, "devren" carryovers) more than model quality. A 33% top-1 day on short-priced favorites shows −25% ROI because the math doesn't work at 1.9× average odds — but the model is doing its job. Don't anchor model-quality reports on money.
+
+# CLAUDE.md
+
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
+
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+
+## 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

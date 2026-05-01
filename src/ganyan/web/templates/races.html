@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 
-{% block title %}Ganyan - Yarislar ({{ race_date }}){% endblock %}
+{% block title %}Ganyan - Yarışlar ({{ race_date }}){% endblock %}
 
 {% block content %}
-<h2>Yarislar &mdash; {{ race_date }}</h2>
+<h2>Yarışlar &mdash; {{ race_date }}</h2>
 
 {% if races %}
 <div class="table-responsive">
@@ -15,7 +15,7 @@
                 <th>Hipodrom</th>
                 <th>Mesafe</th>
                 <th>Zemin</th>
-                <th>Katilimci</th>
+                <th>Katılımcı</th>
                 <th>Durum</th>
                 <th>Tahmin</th>
             </tr>
@@ -31,7 +31,10 @@
                 <td>{{ race.entries|length }}</td>
                 <td>
                     <span class="badge bg-{% if race.status.value == 'scheduled' %}primary{% elif race.status.value == 'resulted' %}success{% else %}warning{% endif %}">
-                        {{ race.status.value }}
+                        {% if race.status.value == 'scheduled' %}bekliyor
+                        {% elif race.status.value == 'resulted' %}sonuçlandı
+                        {% elif race.status.value == 'cancelled' %}iptal
+                        {% else %}{{ race.status.value }}{% endif %}
                     </span>
                 </td>
                 <td>
@@ -46,7 +49,7 @@
 </div>
 {% else %}
 <div class="alert alert-secondary">
-    Bu tarih icin yarış bulunamadi.
+    Bu tarih için yarış bulunamadı.
 </div>
 {% endif %}
 {% endblock %}

@@ -1016,39 +1016,59 @@ class TJKClient:
         race_date: date,
         is_results: bool,
     ) -> list[RawRaceCard]:
-        """Parse the city-level HTML fragment into RawRaceCard list."""
-        race_details = soup.select("div.race-details")
-        tables = soup.select(_SEL_HORSE_TABLE)
-        # Son 800 lives in a sibling ``div.bsinfo-Son800`` inside each
-        # race pane.  Selecting globally and indexing by race position
-        # matches how tables are already selected; verified on live
-        # results HTML where there is exactly one Son 800 per race pane.
-        son_800_divs = (
-            soup.select(_SEL_SON_800) if is_results else []
-        )
-        # Exotic payouts are split across multiple ``div.bahisSonucCard``
-        # elements per race pane (one per pool type: GANYAN, İKİLİ,
-        # SIRALI İKİLİ, …).  We group them by race pane and concatenate
-        # their text so a single regex sweep per pane can extract every
-        # payout at once.
-        if is_results:
-            panes = soup.select("div.races-panes > div")
-            payout_blocks = [
+        """Parse the city-level HTML fragment into RawRaceCard list.
+
+        TJK publishes results in two phases: ``div.race-details`` lands
+        immediately after a race posts; ``table.tablesorter`` and exotic
+        payout cards appear once stewards finalize.  Pairing each race's
+        elements per ``div.races-panes > div`` pane keeps everything
+        aligned even when the latest race has a header but no table —
+        we skip incomplete panes and pick them up on the next scrape.
+        """
+        panes = soup.select("div.races-panes > div")
+        race_details: list[Tag] = []
+        tables: list[Tag] = []
+        son_800_divs: list[Tag | None] = []
+        payout_blocks: list[str] = []
+        pending = 0
+        for pane in panes:
+            detail = pane.select_one("div.race-details")
+            if detail is None:
+                continue
+            table = pane.select_one(_SEL_HORSE_TABLE)
+            if table is None:
+                pending += 1
+                continue
+            race_details.append(detail)
+            tables.append(table)
+            son_800_divs.append(
+                pane.select_one(_SEL_SON_800) if is_results else None
+            )
+            payout_blocks.append(
                 " ".join(
                     c.get_text(" ", strip=True)
                     for c in pane.select("div.bahisSonucCard")
-                )
-                for pane in panes
-            ]
-        else:
+                ) if is_results else ""
+            )
+        if not panes:
+            # Fallback for pages without the panes wrapper (older archive
+            # snapshots).  Positional alignment is brittle but matches
+            # legacy behavior.
+            race_details = list(soup.select("div.race-details"))
+            tables = list(soup.select(_SEL_HORSE_TABLE))
+            son_800_divs = (
+                list(soup.select(_SEL_SON_800)) if is_results else []
+            )
             payout_blocks = []
-
-        if len(race_details) != len(tables):
-            logger.warning(
-                "Mismatch: %d race-details vs %d tables for %s",
-                len(race_details),
-                len(tables),
-                track_name,
+            if len(race_details) != len(tables):
+                logger.warning(
+                    "Mismatch (no panes): %d race-details vs %d tables for %s",
+                    len(race_details), len(tables), track_name,
+                )
+        elif pending and is_results:
+            logger.debug(
+                "%s: %d race(s) awaiting table publication",
+                track_name, pending,
             )
 
         cards: list[RawRaceCard] = []
@@ -1069,7 +1089,7 @@ class TJKClient:
 
             # --- Pace (Son 800) — results pages only ---
             pace_leader = pace_runner_up = None
-            if idx < len(son_800_divs):
+            if idx < len(son_800_divs) and son_800_divs[idx] is not None:
                 pace_leader, pace_runner_up = _parse_son_800(
                     _extract_text(son_800_divs[idx])
                 )
