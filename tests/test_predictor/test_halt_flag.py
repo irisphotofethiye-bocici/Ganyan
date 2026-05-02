@@ -1,7 +1,4 @@
-import os
-import time
 import pytest
-from pathlib import Path
 
 from ganyan.predictor import halt_flag
 
