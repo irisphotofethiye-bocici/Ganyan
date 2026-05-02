@@ -1,19 +1,29 @@
-"""Daily regime monitor — computes per-strategy implied takeout from realized
-payouts vs model probabilities, writes regime_daily row, and sets halt flag if
-30-day rolling implied takeout drifts >2pp from baseline.
+"""Daily regime monitor — writes per-strategy daily snapshots to ``regime_daily``
+and halts via the shared halt flag when the rolling 7d-vs-30d signal drifts
+>2pp from baseline.
 
-Closes premortem failure mode 08 (TJK pool dynamics drift).
+Closes premortem failure mode 08 (TJK pool dynamics drift) **structurally** —
+this canary creates the audit trail and the alerting plumbing. The current
+``implied_takeout`` formula is a known proxy with limited validity (see Notes).
 
 Notes
 -----
 * ``mean_pool_proxy_tl`` is a synthesizing heuristic — there is no real pool
   size in the picks ledger. We approximate it as ``stake * 1000`` averaged
-  per winning pick. The shape (relative changes day-to-day), not the absolute
-  level, is what matters for drift detection.
-* ``implied_takeout = 1 - (mean_prob * mean_payout) / mean_payout``. This is a
-  proxy: it captures regime-level shifts (takeout 22% → 24%, pool composition
-  changing) but is not statistically rigorous on a per-day basis.
+  per winning pick. The shape, not the absolute level, is what matters.
+* ``implied_takeout = 1 - (mean_prob * mean_payout) / mean_payout`` reduces
+  algebraically to ``1 - mean_prob`` because the ``mean_payout`` factors
+  cancel. So the metric we record under that name actually measures the
+  *average model unconfidence on winners* for the strategy. It will drift
+  when the model recalibrates around winners, NOT when TJK changes the
+  takeout rate. To detect actual pool/takeout drift we'd need the raw pool
+  size from TJK (not exposed) or a stake-weighted return ratio over ALL
+  graded picks (hit + miss). Tracking this metric is still useful as a
+  model-calibration canary, but the column name and docstring intent are
+  aspirational, not literal. See memory ``project_regime_monitor_metric_caveat``.
 * The drift threshold (>2pp 7d-vs-30d) is a calibration knob.
+* Filter is ``hit=True`` so the sample is sparse (≈3 winners/strategy/day);
+  day-over-day noise on small n means the 2pp threshold may fire on noise.
 * ``model_prob_pct`` is stored as percentage 0-100 in the picks ledger, hence
   the divide-by-100 to get a fraction.
 """
