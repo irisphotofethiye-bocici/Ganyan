@@ -232,8 +232,7 @@ class EnsemblePredictor:
             # doesn't match this race's race_type.
             if not _model_applies_to_race(model, race.race_type):
                 continue
-            cols = [c for c in model.feature_columns if c in frame.columns]
-            X_df = frame[cols].astype("float64")
+            X_df = frame.reindex(columns=model.feature_columns).astype("float64")
             if isinstance(model, LoadedLinearModel):
                 raw = model.predict_raw(X_df.to_numpy())
             else:

@@ -470,7 +470,7 @@ def bind_track_conditions_to_races(
         session.query(ExternalSignal)
         .filter(
             ExternalSignal.source_name.in_(
-                ["tjk_track_conditions", "tjk_steward_reports", "openweather"],
+                ["tjk_track_conditions", "tjk_steward_reports"],
             ),
             ExternalSignal.race_id.is_(None),
         )

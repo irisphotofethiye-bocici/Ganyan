@@ -317,7 +317,7 @@ def scrape_external(
             bound += bind_discipline_to_entries(session, target)
         if source == "tjk_workouts":
             bound += bind_workouts_to_entries(session, target)
-        if source in ("tjk_track_conditions", "tjk_steward_reports", "openweather"):
+        if source in ("tjk_track_conditions", "tjk_steward_reports"):
             bound += bind_track_conditions_to_races(session, target)
         session.commit()
     finally:

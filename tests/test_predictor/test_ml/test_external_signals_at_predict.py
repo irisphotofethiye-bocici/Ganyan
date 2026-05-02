@@ -68,46 +68,6 @@ def _seed_minimal_race(s):
     return race, horses_entries
 
 
-def test_build_race_frame_propagates_track_conditions(session):
-    """Track-conditions signal bound to race_id must surface as
-    non-NaN temperature/humidity/pressure/sky_bucket/wind_kph columns
-    in the predict-time DataFrame.
-    """
-    from ganyan.predictor.ml.features import build_race_frame
-
-    race, _ = _seed_minimal_race(session)
-
-    session.add(ExternalSignal(
-        source_name="openweather",
-        signal_type="track_conditions",
-        race_id=race.id,
-        payload={
-            "track_city": "Bursa",
-            "reading_date": "2026-05-02",
-            "temperature_c": 22,
-            "humidity_pct": 55,
-            "pressure_mb": 1014,
-            "sky_bucket": 1,
-            "wind_kph": 14,
-        },
-        captured_at=datetime(2026, 5, 2, 11, 0, 0),
-    ))
-    session.commit()
-
-    frame = build_race_frame(session, race.id)
-
-    assert not frame.empty, "expected one row per entry"
-    for col in ("temperature_c", "humidity_pct", "pressure_mb", "sky_bucket", "wind_kph"):
-        assert col in frame.columns, f"missing column {col}"
-        assert frame[col].notna().all(), (
-            f"{col} is NaN at predict-time despite a populated track_conditions "
-            "signal — extract_features is not receiving race_id_for_signals."
-        )
-
-    assert frame["temperature_c"].iloc[0] == 22.0
-    assert frame["sky_bucket"].iloc[0] == 1.0
-
-
 def test_build_race_frame_propagates_tipster_consensus(session):
     """Tipster-consensus signal bound to race_entry_id must surface
     as a non-NaN tipster_consensus column for that entry.

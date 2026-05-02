@@ -75,13 +75,6 @@ class HorseFeatures:
     days_since_workout: float | None = None  # days between latest workout and today
     workout_speed_ms: float | None = None  # m/s on latest split closest to race distance
     n_workouts_recent: float | None = None  # distinct workout dates in lookback window
-    # Track-condition features (race-level, shared across all entries).
-    # NaN until PistBilgileri scrape captures readings for the track-day.
-    temperature_c: float | None = None
-    humidity_pct: float | None = None
-    pressure_mb: float | None = None
-    sky_bucket: float | None = None
-    wind_kph: float | None = None
     # 1 when a steward report exists for this race's track-day.
     steward_report_flag: float | None = None
 
@@ -698,44 +691,6 @@ def lookup_agf_reliability(
     return table.get((race_type, bucket, surface))
 
 
-def compute_track_conditions(
-    session: Session, race_id: int | None,
-) -> tuple[float | None, float | None, float | None, float | None, float | None]:
-    """Pull track conditions for ``race_id``: temperature, humidity,
-    pressure, sky bucket, wind kph.
-
-    Race-level signal — every entry in a given race shares the same
-    weather reading.  Returns 5-tuple (all may be ``None`` until the
-    PistBilgileri scrape captures the day's reading for the track).
-    """
-    from ganyan.db.models import ExternalSignal
-
-    if race_id is None:
-        return (None,) * 5
-    row = (
-        session.query(ExternalSignal.payload)
-        .filter(
-            ExternalSignal.race_id == race_id,
-            ExternalSignal.signal_type == "track_conditions",
-        )
-        .order_by(ExternalSignal.captured_at.desc())
-        .first()
-    )
-    if row is None or row[0] is None:
-        return (None,) * 5
-    payload = row[0]
-    def _f(key):
-        v = payload.get(key)
-        return float(v) if v is not None else None
-    return (
-        _f("temperature_c"),
-        _f("humidity_pct"),
-        _f("pressure_mb"),
-        _f("sky_bucket"),
-        _f("wind_kph"),
-    )
-
-
 def compute_steward_report_flag(
     session: Session, race_id: int | None,
 ) -> float | None:
@@ -1180,13 +1135,6 @@ def extract_features(
         ) = compute_workout_signals(
             session, race_entry_id, distance_meters, race_date=race_date,
         )
-        (
-            features.temperature_c,
-            features.humidity_pct,
-            features.pressure_mb,
-            features.sky_bucket,
-            features.wind_kph,
-        ) = compute_track_conditions(session, race_id_for_signals)
         features.steward_report_flag = compute_steward_report_flag(
             session, race_id_for_signals,
         )

@@ -126,8 +126,7 @@ class MLPredictor:
         if frame.empty:
             return []
 
-        feature_cols = self.model.feature_columns
-        X = frame[feature_cols].astype("float64")
+        X = frame.reindex(columns=self.model.feature_columns).astype("float64")
         raw_scores = self.model.booster.predict(X)
 
         # Within-race softmax with the training-time fitted temperature.
@@ -150,7 +149,7 @@ class MLPredictor:
                 continue
             factors = {
                 col: float(row[col])
-                for col in feature_cols
+                for col in self.model.feature_columns
                 if col in row and row[col] is not None and not _isnan(row[col])
             }
             predictions.append(
