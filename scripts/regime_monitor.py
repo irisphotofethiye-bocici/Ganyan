@@ -1,35 +1,46 @@
 """Daily regime monitor — writes per-strategy daily snapshots to ``regime_daily``
-and halts via the shared halt flag when the rolling 7d-vs-30d signal drifts
->2pp from baseline.
+and halts via the shared halt flag when the rolling 7d-vs-30d implied_takeout
+signal drifts more than the threshold from baseline.
 
-Closes premortem failure mode 08 (TJK pool dynamics drift) **structurally** —
-this canary creates the audit trail and the alerting plumbing. The current
-``implied_takeout`` formula is a known proxy with limited validity (see Notes).
+Closes premortem failure mode 08 (TJK pool dynamics drift). The signal is
+realized payout efficiency on hits, normalized by the model's win probability:
+each hit contributes ``(payout_tl × prob_win) / stake_tl``, and ``implied_takeout``
+is ``max(0, 1 - mean_efficiency)``.
+
+Why this works: TJK takeout sets a hard cap on the average ``payout_tl /
+stake_tl`` ratio. By multiplying by ``prob_win``, we control for model
+calibration on the picks that hit (an over-confident model on hits would
+inflate the ratio; an under-confident one would deflate it, but day-over-day
+those drift on the timescale of model retrains, not within a 7-day window).
+What remains is the TJK-determined payout structure — exactly the regime
+signal we want to track.
 
 Notes
 -----
 * ``mean_pool_proxy_tl`` is a synthesizing heuristic — there is no real pool
   size in the picks ledger. We approximate it as ``stake * 1000`` averaged
   per winning pick. The shape, not the absolute level, is what matters.
-* ``implied_takeout = 1 - (mean_prob * mean_payout) / mean_payout`` reduces
-  algebraically to ``1 - mean_prob`` because the ``mean_payout`` factors
-  cancel. So the metric we record under that name actually measures the
-  *average model unconfidence on winners* for the strategy. It will drift
-  when the model recalibrates around winners, NOT when TJK changes the
-  takeout rate. To detect actual pool/takeout drift we'd need the raw pool
-  size from TJK (not exposed) or a stake-weighted return ratio over ALL
-  graded picks (hit + miss). Tracking this metric is still useful as a
-  model-calibration canary, but the column name and docstring intent are
-  aspirational, not literal. See memory ``project_regime_monitor_metric_caveat``.
-* The drift threshold (>2pp 7d-vs-30d) is a calibration knob.
-* Filter is ``hit=True`` so the sample is sparse (≈3 winners/strategy/day);
-  day-over-day noise on small n means the 2pp threshold may fire on noise.
+* The signal has a remaining model-calibration confound: if the model becomes
+  systematically over- or under-confident *on hits* (not all picks) and that
+  drifts over a 7-day window, this metric will drift too. In practice this
+  drifts on the timescale of model retrains (weeks-to-months), not days, so
+  the 7d-vs-30d window mostly captures TJK dynamics. If you retrain mid-week,
+  expect a one-time step in this signal that is not real TJK drift.
+* Filter is ``hit=True`` so the sample is sparse (≈3 winners/strategy/day).
+  Day-over-day noise on small n means thresholds <4pp will fire on noise
+  alone — see ``GANYAN_TAKEOUT_DRIFT_PP``, default 4.0.
 * ``model_prob_pct`` is stored as percentage 0-100 in the picks ledger, hence
   the divide-by-100 to get a fraction.
+
+Env overrides
+-------------
+* ``GANYAN_TAKEOUT_DRIFT_PP`` — float, default 4.0 (raised from the original
+  2.0 plan-time prior; per the canary-tuning memory, 2pp on n≈3 fires on noise).
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from datetime import date, timedelta
 from statistics import mean
@@ -42,7 +53,18 @@ from ganyan.predictor import halt_flag
 
 
 STRATEGIES = ("uclu_box6", "sirali_ikili_top1")
-TAKEOUT_DRIFT_PP_THRESHOLD = 2.0
+TAKEOUT_DRIFT_PP_THRESHOLD = float(os.environ.get("GANYAN_TAKEOUT_DRIFT_PP", "4.0"))
+
+
+def _payout_efficiency(pick) -> float | None:
+    """Per-hit signal: ``(payout_tl × prob_win) / stake_tl``.
+
+    Returns None if any of stake_tl, model_prob_pct, payout_tl is missing
+    or stake is zero.
+    """
+    if not pick.model_prob_pct or not pick.stake_tl or not pick.payout_tl:
+        return None
+    return float(pick.payout_tl) * (float(pick.model_prob_pct) / 100.0) / float(pick.stake_tl)
 
 
 def _snapshot_one(session, today, strategy):
@@ -60,20 +82,18 @@ def _snapshot_one(session, today, strategy):
         return None
 
     payouts = [float(p.payout_tl or 0) for p in today_picks]
-    probs = [float(p.model_prob_pct or 0) / 100 for p in today_picks if p.model_prob_pct]
     n = len(today_picks)
     mean_payout = mean(payouts)
     pool_proxy = sum(float(p.stake_tl or 0) * 1000 for p in today_picks) / max(n, 1)
 
-    if probs:
-        expected_return = mean(probs) * mean_payout
-        implied_takeout = max(0.0, 1.0 - (expected_return / max(mean_payout, 1)))
+    efficiencies = [e for e in (_payout_efficiency(p) for p in today_picks) if e is not None]
+    if efficiencies:
+        mean_efficiency = mean(efficiencies)
+        implied_takeout = max(0.0, 1.0 - mean_efficiency)
+        realized_vs_expected = mean_efficiency
     else:
         implied_takeout = None
-
-    realized_vs_expected = None
-    if probs and mean_payout:
-        realized_vs_expected = mean_payout / max(mean(probs) * mean_payout, 1e-6)
+        realized_vs_expected = None
 
     return RegimeDaily(
         snapshot_date=today,
@@ -129,8 +149,6 @@ def main() -> int:
             row = _snapshot_one(session, today, strat)
             if row is None:
                 continue
-            # Idempotent on (snapshot_date, strategy) unique constraint:
-            # delete any existing snapshot for today+strategy, then insert fresh.
             session.query(RegimeDaily).filter(
                 RegimeDaily.snapshot_date == today,
                 RegimeDaily.strategy == strat,
@@ -138,12 +156,20 @@ def main() -> int:
             session.add(row)
         session.commit()
 
+        reasons = []
         for strat in STRATEGIES:
             reason = _check_takeout_drift(session, today, strat)
             if reason:
-                halt_flag.set_halt(reason=reason, source="regime_monitor")
+                reasons.append(reason)
                 print(reason, file=sys.stderr)
-                return 1
+
+        if reasons:
+            halt_reason = reasons[0] + (
+                f"; {len(reasons) - 1} more strategy drift(s) logged"
+                if len(reasons) > 1 else ""
+            )
+            halt_flag.set_halt(reason=halt_reason, source="regime_monitor")
+            return 1
     finally:
         session.close()
 
