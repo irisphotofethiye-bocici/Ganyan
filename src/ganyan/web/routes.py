@@ -1281,6 +1281,7 @@ def advice_dashboard():
         uclu_probabilities,
     )
     from ganyan.predictor.trip_wire import compute_trip_wire, is_anomalous, is_halt
+    from ganyan.predictor import halt_flag, rolling_pnl_halt, uniformity_guard
     from sqlalchemy.orm import joinedload
 
     # uclu_top1 dropped 2026-05-02: 0 hits on n=16 gated picks, ROI −100%.
@@ -1323,6 +1324,20 @@ def advice_dashboard():
         return None
 
     session = _get_session()
+
+    # Halt-flag canary checks. If any fires, the flag is set and rendering
+    # downgrades to informational (no stake_tl / kelly_tl). First writer wins.
+    halt_state = halt_flag.is_halted()
+    if halt_state is None:
+        # In-process canary: rolling-PnL halt per active strategy.
+        pnl_results = rolling_pnl_halt.check_all_strategies(
+            session, BETTING_STRATEGIES,
+        )
+        for _strat, _reason in pnl_results.items():
+            if _reason:
+                halt_flag.set_halt(reason=_reason, source="rolling_pnl_halt")
+                halt_state = halt_flag.is_halted()
+                break
 
     # Lazy-load Bayes posterior + per-horse history (speed/workout/pace).
     # All three histories are session-scoped (one query each) and reused
@@ -1603,6 +1618,20 @@ def advice_dashboard():
                     })
                     n_skipped_bayes += 1
                     continue
+            # Uniformity guard — degenerate 1/N softmax catches AGF-NULL etc.
+            if halt_state is None:
+                race_probs = [
+                    float(e.predicted_probability or 0) for e in r.entries
+                ]
+                _u_reason = uniformity_guard.check_race_field(
+                    race_id=r.id, probabilities=race_probs,
+                )
+                if _u_reason:
+                    halt_flag.set_halt(
+                        reason=_u_reason, source="uniformity_guard",
+                    )
+                    halt_state = halt_flag.is_halted()
+
             kelly_mult_eff = kelly_mult
             bayes_conf = None
             if bayes_top is not None:
@@ -1655,8 +1684,9 @@ def advice_dashboard():
                     ),
                     "model_prob_pct": prob,
                     "calibrated_prob_pct": calibrated_prob_pct,
-                    "stake_tl": stake,
-                    "kelly_tl": kelly_tl,
+                    # Halt suppresses stake/kelly display; template renders "—".
+                    "stake_tl": None if halt_state else stake,
+                    "kelly_tl": None if halt_state else kelly_tl,
                     "hit": bool(p.hit) if p.graded else False,
                     "is_miss": is_miss,
                     "is_no_pool": is_no_pool,
@@ -1774,6 +1804,7 @@ def advice_dashboard():
             trip_halt=trip_halt,
             trip_warn=trip_warn,
             trip_bypassed=trip_wire_bypass,
+            halt_state=halt_state,
         )
     finally:
         session.close()

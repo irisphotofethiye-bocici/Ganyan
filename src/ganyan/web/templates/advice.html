@@ -107,6 +107,23 @@
     {% endif %}
 {% endif %}
 
+{# Halt-flag banner — additive to trip-wire. Surfaces rolling-PnL halt and
+   uniformity-guard halt. Stake/Kelly columns render "—" while halted. #}
+{% if halt_state %}
+<div class="alert alert-warning mb-3" role="alert">
+    <strong>Advice halted — informational rendering only.</strong>
+    <div class="small text-muted mt-1">
+        {{ halt_state.reason }}<br>
+        Source: <code>{{ halt_state.source }}</code> · {{ halt_state.timestamp }}
+    </div>
+    <div class="mt-2 small">
+        Picks and confidence are shown below; Kelly-sized stake recommendations
+        are suppressed until the underlying canary clears
+        (manual: <code>rm /tmp/ganyan-halt.flag</code>).
+    </div>
+</div>
+{% endif %}
+
 {% if not trip_halt %}
 <!-- Top filter strip — shows what's filtering races right now -->
 <div class="card mb-3 bg-light border-0">
@@ -475,9 +492,17 @@
                     <td class="text-end">
                         <strong>{{ "{:.1f}%".format(pick.calibrated_prob_pct) }}</strong>
                     </td>
-                    <td class="text-end">{{ "{:,.0f}".format(pick.stake_tl) }} TL</td>
                     <td class="text-end">
-                        {% if pick.kelly_tl and pick.kelly_tl > 0 %}
+                        {% if pick.stake_tl is not none %}
+                            {{ "{:,.0f}".format(pick.stake_tl) }} TL
+                        {% else %}
+                            <span class="text-muted">—</span>
+                        {% endif %}
+                    </td>
+                    <td class="text-end">
+                        {% if pick.kelly_tl is none %}
+                            <span class="text-muted">—</span>
+                        {% elif pick.kelly_tl > 0 %}
                             <strong>{{ "{:,.0f}".format(pick.kelly_tl) }} TL</strong>
                         {% else %}
                             <span class="text-muted">atla</span>
