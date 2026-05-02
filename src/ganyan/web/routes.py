@@ -118,10 +118,12 @@ def index():
     """
     from sqlalchemy import func
 
+    from ganyan.config import get_settings
     from ganyan.db.models import (
         AgfSnapshot, JobRun, Pick, RaceEntry,
     )
 
+    settings = get_settings()
     session = _get_session()
     today = date.today()
     try:
@@ -235,6 +237,7 @@ def index():
             n_graded=n_graded,
             n_hit=n_hit,
             next_race=next_race,
+            show_backfill=settings.show_backfill_ui,
         )
     finally:
         session.close()
@@ -716,6 +719,9 @@ def scrape_history():
     from ganyan.scraper.backfill import BackfillManager
 
     settings = get_settings()
+    if not settings.show_backfill_ui:
+        return jsonify({"error": "Geçmiş veri yükleme arayüzü kapalı."}), 404
+
     session = _get_session()
 
     from_str = request.form.get("from_date", "")

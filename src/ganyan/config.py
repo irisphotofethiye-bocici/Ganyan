@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     flask_port: int = 5003
     flask_debug: bool = False
     openweather_api_key: str | None = None
+    show_backfill_ui: bool = False
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

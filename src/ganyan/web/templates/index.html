@@ -183,6 +183,7 @@
             </ul>
         </div>
 
+        {% if show_backfill|default(false) %}
         <h5 class="text-muted">Geçmiş Veri Yükle</h5>
         <div class="card mb-3">
             <div class="card-body py-3">
@@ -205,6 +206,7 @@
                 </form>
             </div>
         </div>
+        {% endif %}
 
         {% if recent_races %}
         <h5 class="text-muted">Son Sonuçlar</h5>
