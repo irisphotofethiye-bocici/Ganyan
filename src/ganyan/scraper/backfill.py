@@ -468,6 +468,8 @@ def update_race_results(session: Session, parsed: ParsedRaceCard) -> Race | None
         if value is not None and getattr(race, field) is None:
             setattr(race, field, value)
 
+    _persist_multi_race_pools(session, race.track_id, parsed)
+
     horse_cache = _fetch_horses_by_names(
         session, [h.name for h in parsed.horses if h.name],
     )
