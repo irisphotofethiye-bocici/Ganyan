@@ -2134,9 +2134,29 @@ def advice_cmd(
         return None
 
     from ganyan.predictor.trip_wire import compute_trip_wire, is_anomalous, is_halt
+    from ganyan.predictor import halt_flag, rolling_pnl_halt
 
     session = get_session()
     try:
+        # Halt-flag canary: mirrors web /advice. Once set, banner prints and
+        # stake/kelly columns render as "—" (informational only).
+        halt_state = halt_flag.is_halted()
+        if halt_state is None:
+            for _strat, _reason in rolling_pnl_halt.check_all_strategies(
+                session, BETTING_STRATEGIES,
+            ).items():
+                if _reason:
+                    halt_flag.set_halt(reason=_reason, source="rolling_pnl_halt")
+                    halt_state = halt_flag.is_halted()
+                    break
+        if halt_state is not None:
+            typer.secho(
+                f"⚠️  ADVICE HALTED — informational only.\n"
+                f"  reason: {halt_state['reason']}\n"
+                f"  source: {halt_state['source']}",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
         if bayes_idata is not None:
             from ganyan.predictor.speed_figures import (
                 build_horse_speed_history, compute_track_variants,
@@ -2306,8 +2326,12 @@ def advice_cmd(
                     )
                 pick_data[strat] = {
                     "combination_names": p.combination_names,
-                    "stake_tl": stake,
-                    "kelly_suggested_tl": round(kelly_tl, 2) if kelly_tl is not None else None,
+                    # Halt suppresses stake/kelly; consumers see None.
+                    "stake_tl": None if halt_state is not None else stake,
+                    "kelly_suggested_tl": (
+                        None if halt_state is not None
+                        else (round(kelly_tl, 2) if kelly_tl is not None else None)
+                    ),
                     "kelly_multiplier_effective": round(kelly_mult_eff, 4),
                     "bayes_confidence": round(bayes_conf, 3) if bayes_conf is not None else None,
                     "model_prob_pct": prob,
@@ -2334,6 +2358,7 @@ def advice_cmd(
             "date": str(target_date),
             "bankroll_tl": bankroll,
             "kelly_multiplier": kelly_fraction,
+            "halt": halt_state,
             "strategy_edge_stats": {
                 k: v.to_dict() for k, v in edge_stats.items()
             },
@@ -2427,7 +2452,7 @@ def advice_cmd(
                 names = names[:40] + "…"
             stake = float(p.stake_tl)
 
-            bet_mark = f"{stake:>4.0f} TL"
+            bet_mark = "       —" if halt_state is not None else f"{stake:>4.0f} TL"
             outcome = ""
             is_effective = True
             if p.graded:
@@ -2468,7 +2493,9 @@ def advice_cmd(
                     base_stake_tl=stake,
                     kelly_multiplier=kelly_mult_eff,
                 )
-                if suggested <= 0:
+                if halt_state is not None:
+                    kelly_label = "  kelly: —"
+                elif suggested <= 0:
                     kelly_label = "  kelly: skip"
                 else:
                     kelly_label = f"  kelly: {suggested:,.0f} TL"
