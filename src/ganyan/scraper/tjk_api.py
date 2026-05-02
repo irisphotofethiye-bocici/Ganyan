@@ -407,6 +407,17 @@ _POOL_LABEL_PATTERNS: dict[str, str] = {
     "dortlu": r"(?<![\w'İ])DÖRTLÜ\s+BAHİS\s+(\d+/\d+/\d+/\d+)\s+([\d.,]+)",
 }
 
+# Multi-race pool patterns. Each combo is N legs of slash-separated
+# horse numbers, with optional comma-separated alternatives within a
+# leg (TJK uses commas for dead-heat ties). Captures (combo, payout).
+# These pool labels can repeat ("1. 6'LI", "2. 6'LI") so we use
+# ``re.findall`` rather than ``re.search`` at the call site.
+_MULTI_POOL_PATTERNS: dict[str, str] = {
+    "5li":  r"(?<![\w'İ])5'L[İI]\s+GANYAN\s+(\d+(?:,\d+)*(?:/\d+(?:,\d+)*){4})\s+([\d.,]+)",
+    "6li":  r"(?<![\w'İ])6'L[İI]\s+GANYAN\s+(\d+(?:,\d+)*(?:/\d+(?:,\d+)*){5})\s+([\d.,]+)",
+    "7li":  r"(?<![\w'İ])7'L[İI]\s+GANYAN\s+(\d+(?:,\d+)*(?:/\d+(?:,\d+)*){6})\s+([\d.,]+)",
+}
+
 
 def _parse_payout_amount(text: str) -> float | None:
     """Parse Turkish-formatted amounts like ``"51,20"`` or ``"3.450,75"``."""
@@ -452,6 +463,31 @@ def _parse_exotic_payouts(block_text: str) -> dict[str, float | None]:
         if m:
             out[label] = _parse_payout_amount(m.group(2))
 
+    return out
+
+
+def _parse_multi_race_pools(block_text: str) -> list[dict]:
+    """Extract any 5'lı/6'lı/7'lı pool entries from a bahisSonucCard block.
+
+    Returns a list of dicts ``{pool_type, pool_index, winning_combo, payout_tl}``
+    in the order they appear. ``pool_index`` is 1 for the first occurrence
+    of a given pool_type in the block, 2 for the second, etc. — TJK
+    occasionally runs two 6'lı pools on the same program and labels them
+    "1. 6'LI" / "2. 6'LI", so we count occurrences positionally.
+    """
+    if not block_text:
+        return []
+    out: list[dict] = []
+    for pool_type, pattern in _MULTI_POOL_PATTERNS.items():
+        index = 0
+        for m in re.finditer(pattern, block_text):
+            index += 1
+            out.append({
+                "pool_type": pool_type,
+                "pool_index": index,
+                "winning_combo": m.group(1),
+                "payout_tl": _parse_payout_amount(m.group(2)),
+            })
     return out
 
 
@@ -1099,8 +1135,10 @@ class TJKClient:
                 "ganyan": None, "ikili": None, "sirali_ikili": None,
                 "uclu": None, "dortlu": None,
             }
+            multi_pools: list[dict] = []
             if idx < len(payout_blocks):
                 payouts = _parse_exotic_payouts(payout_blocks[idx])
+                multi_pools = _parse_multi_race_pools(payout_blocks[idx])
 
             # --- Horse rows ---
             table = tables[idx]
@@ -1129,6 +1167,7 @@ class TJKClient:
                 sirali_ikili_payout_tl=payouts.get("sirali_ikili"),
                 uclu_payout_tl=payouts.get("uclu"),
                 dortlu_payout_tl=payouts.get("dortlu"),
+                multi_race_pools=multi_pools,
                 horses=horses,
             )
             cards.append(card)

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ganyan.db.models import (
     AgfSnapshot,
     Horse,
+    MultiRacePool,
     Race,
     RaceEntry,
     RaceStatus,
@@ -267,8 +268,46 @@ def store_race_card(session: Session, parsed: ParsedRaceCard) -> Race:
         session.flush()
         _record_agf_snapshot(session, entry, h)
 
+    _persist_multi_race_pools(session, race.track_id, parsed)
     session.flush()
     return race
+
+
+def _persist_multi_race_pools(
+    session: Session, track_id: int, parsed: ParsedRaceCard,
+) -> None:
+    """Upsert each multi-race pool entry on this race's bahisSonucCard.
+
+    Idempotent on (date, track_id, pool_type, pool_index): TJK echoes
+    the same pool data on every leg of the pool, so we just refresh
+    winning_combo/payout_tl on each pass and rely on the unique
+    constraint to skip duplicates.
+    """
+    if not parsed.multi_race_pools:
+        return
+    for entry in parsed.multi_race_pools:
+        existing = (
+            session.query(MultiRacePool)
+            .filter(
+                MultiRacePool.date == parsed.date,
+                MultiRacePool.track_id == track_id,
+                MultiRacePool.pool_type == entry["pool_type"],
+                MultiRacePool.pool_index == entry["pool_index"],
+            )
+            .first()
+        )
+        if existing is None:
+            session.add(MultiRacePool(
+                date=parsed.date,
+                track_id=track_id,
+                pool_type=entry["pool_type"],
+                pool_index=entry["pool_index"],
+                winning_combo=entry.get("winning_combo"),
+                payout_tl=entry.get("payout_tl"),
+            ))
+        else:
+            existing.winning_combo = entry.get("winning_combo")
+            existing.payout_tl = entry.get("payout_tl")
 
 
 def store_historical_race(session: Session, parsed: ParsedRaceCard) -> Race:
@@ -386,6 +425,7 @@ def store_historical_race(session: Session, parsed: ParsedRaceCard) -> Race:
         session.flush()
         _record_agf_snapshot(session, entry, h)
 
+    _persist_multi_race_pools(session, race.track_id, parsed)
     session.flush()
     return race
 

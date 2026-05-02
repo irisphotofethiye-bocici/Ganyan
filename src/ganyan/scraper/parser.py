@@ -63,6 +63,13 @@ class RawRaceCard:
     sirali_ikili_payout_tl: float | None = None
     uclu_payout_tl: float | None = None
     dortlu_payout_tl: float | None = None
+    # Multi-race pool payouts (5'lı / 6'lı / 7'lı) appearing on this
+    # race's bahisSonucCard. Each entry is
+    # ``{pool_type, pool_index, winning_combo, payout_tl}``. TJK shows
+    # the multi-race pool payout on the LAST leg's card; earlier legs
+    # may carry the same data redundantly. Storage layer dedupes by
+    # (date, track, pool_type, pool_index).
+    multi_race_pools: list[dict] = field(default_factory=list)
     horses: list[RawHorseEntry] = field(default_factory=list)
 
 
@@ -115,6 +122,7 @@ class ParsedRaceCard:
     sirali_ikili_payout_tl: float | None = None
     uclu_payout_tl: float | None = None
     dortlu_payout_tl: float | None = None
+    multi_race_pools: list[dict] = field(default_factory=list)
     horses: list[ParsedHorseEntry] = field(default_factory=list)
 
 
@@ -284,5 +292,6 @@ def parse_race_card(raw: RawRaceCard) -> ParsedRaceCard:
         sirali_ikili_payout_tl=raw.sirali_ikili_payout_tl,
         uclu_payout_tl=raw.uclu_payout_tl,
         dortlu_payout_tl=raw.dortlu_payout_tl,
+        multi_race_pools=list(raw.multi_race_pools or []),
         horses=horses,
     )

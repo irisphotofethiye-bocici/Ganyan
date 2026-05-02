@@ -404,3 +404,46 @@ class RegimeDaily(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False,
     )
+
+
+class MultiRacePool(Base):
+    """A higher-order pari-mutuel pool that spans multiple races
+    (5'lı / 6'lı / 7'lı GANYAN).
+
+    Per-race payouts (``Race.ganyan_payout_tl`` etc.) cover up to 4'lü.
+    Multi-race pools are program-level — one or two of them per
+    track-day — so they live here keyed by (date, track, pool_type,
+    pool_index) instead of being shoved onto Race rows.
+
+    ``pool_index`` distinguishes "1. 6'LI" (races 1-6) from "2. 6'LI"
+    (races 4-9 on programs that run two 6'lı pools).
+
+    ``winning_combo`` is the raw TJK slash-separated string (e.g.
+    ``"3/1,12/4/2/5/7"`` where commas indicate dead-heat alternatives).
+    """
+
+    __tablename__ = "multi_race_pools"
+    __table_args__ = (
+        UniqueConstraint(
+            "date", "track_id", "pool_type", "pool_index",
+            name="uq_multi_race_pool_date_track_type_idx",
+        ),
+        Index("ix_multi_race_pools_date_track", "date", "track_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    date: Mapped[date_type] = mapped_column(Date, nullable=False)
+    track_id: Mapped[int] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False,
+    )
+    pool_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    pool_index: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    start_race_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    end_race_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    winning_combo: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    payout_tl: Mapped[float | None] = mapped_column(
+        Numeric(14, 2), nullable=True,
+    )
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False,
+    )
