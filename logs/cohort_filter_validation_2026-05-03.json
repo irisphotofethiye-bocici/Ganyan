@@ -1,0 +1,18 @@
+{
+  "uclu_box6": {
+    "kept_n": 144,
+    "kept_roi": -0.3989872685185185,
+    "filtered_n": 77,
+    "filtered_roi": -0.547077922077922,
+    "gap_pp": 14.809065355940355,
+    "verdict": "FILTER_HELPS \u2014 keep default ON"
+  },
+  "sirali_ikili_top1": {
+    "kept_n": 260,
+    "kept_roi": -0.1321153846153846,
+    "filtered_n": 179,
+    "filtered_roi": -0.028491620111731845,
+    "gap_pp": -10.362376450365277,
+    "verdict": "FILTER_HURTS \u2014 flip default OFF"
+  }
+}
