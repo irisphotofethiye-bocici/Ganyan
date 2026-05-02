@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import date as date_type
 
@@ -773,12 +772,15 @@ def compute_steward_report_flag(
 def compute_workout_signals(
     session: Session, race_entry_id: int | None,
     race_distance_m: int | None = None,
+    race_date: date_type | None = None,
 ) -> tuple[float | None, float | None, float | None]:
     """Three workout-derived features for the entry's horse:
 
     1. ``days_since_workout`` — days between the most recent workout
-       and today.  Lower = recently trained.  ``None`` until a
-       workout is captured.
+       and the race date.  Lower = recently trained.  ``None`` until a
+       workout is captured, or until ``race_date`` is supplied (the
+       feature requires a temporal anchor — falls back to today when
+       race_date is None for back-compat with live predict callers).
     2. ``workout_speed_ms`` — meters-per-second on the most recent
        timed split.  Higher = sharper recent work.  Picks the split
        closest to ``race_distance_m`` when provided, else the longest
@@ -805,7 +807,6 @@ def compute_workout_signals(
     if not rows:
         return None, None, None
 
-    today = datetime.now().date() if False else None  # placeholder, unused
     most_recent_date: date_type | None = None
     workout_dates: set = set()
     best_split: tuple[int, float] | None = None  # (distance, seconds)
@@ -833,21 +834,20 @@ def compute_workout_signals(
         gap = abs(dist - target_distance)
         if best_split is None:
             best_split = (dist, float(value))
-            best_gap = gap
             best_date = wd
         else:
             # Prefer smaller distance gap; on tie prefer fresher date.
-            curr_dist, curr_sec = best_split
+            curr_dist, _ = best_split
             curr_gap = abs(curr_dist - target_distance)
             if gap < curr_gap or (gap == curr_gap and wd > best_date):
                 best_split = (dist, float(value))
-                best_gap = gap
                 best_date = wd
 
     days_since = None
     if most_recent_date is not None:
         from datetime import date as _date
-        days_since = float((_date.today() - most_recent_date).days)
+        anchor = race_date if race_date is not None else _date.today()
+        days_since = float((anchor - most_recent_date).days)
 
     workout_speed_ms = None
     if best_split is not None and best_split[1] > 0:
@@ -1178,7 +1178,7 @@ def extract_features(
             features.workout_speed_ms,
             features.n_workouts_recent,
         ) = compute_workout_signals(
-            session, race_entry_id, distance_meters,
+            session, race_entry_id, distance_meters, race_date=race_date,
         )
         (
             features.temperature_c,

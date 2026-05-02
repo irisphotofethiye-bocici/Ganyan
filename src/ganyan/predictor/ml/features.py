@@ -22,7 +22,6 @@ from datetime import date as date_type
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from ganyan.db.models import Race, RaceEntry, RaceStatus
@@ -458,6 +457,8 @@ def build_race_frame(session: Session, race_id: int) -> pd.DataFrame:
             equipment=entry.equipment,
             field_pace_density=pace_density,
             agf_reliability=agf_reliability,
+            race_entry_id=entry.id,
+            race_id_for_signals=race.id,
         )
         rows.append({
             "horse_id": entry.horse_id,

@@ -1023,7 +1023,7 @@ def live_sheet():
     Auto-refreshes every 30s so the picks appear before the race and
     fill in outcomes as results come in.
     """
-    from ganyan.db.models import Race, RaceEntry, RaceStatus
+    from ganyan.db.models import Race, RaceStatus
     from ganyan.predictor.exotics import (
         ganyan_probabilities, ikili_probabilities,
         sirali_ikili_probabilities, uclu_probabilities,
@@ -1051,6 +1051,13 @@ def live_sheet():
         # Pool → (races_staked, hits, stake, payout)
         tally = {p: [0, 0, 0.0, 0.0] for p in ("ganyan", "ikili", "sirali_ikili", "uclu")}
         STAKE = 100.0
+        # Per-pool birim (minimum bilet stake).  TJK publishes payouts as
+        # "what one bilet at the pool's birim wins" — divide by birim
+        # so payout_tl × stake / birim gives the actual TL.  Mirrors
+        # BIRIM_TL_BY_STRATEGY in predictor/picks.py.  Üçlü birim = 2 TL,
+        # others = 1 TL — without this divisor the /live tally double-
+        # counts üçlü winnings vs the graded ledger.
+        POOL_BIRIM_TL = {"ganyan": 1.0, "ikili": 1.0, "sirali_ikili": 1.0, "uclu": 2.0}
 
         for race in races:
             entries = list(race.entries)
@@ -1123,7 +1130,8 @@ def live_sheet():
                     tally[pool][2] += STAKE    # stake
                     if hit:
                         tally[pool][1] += 1
-                        tally[pool][3] += float(payout_tl) * STAKE
+                        birim = POOL_BIRIM_TL.get(pool, 1.0)
+                        tally[pool][3] += float(payout_tl) * STAKE / birim
 
             rows.append({
                 "race": race,
@@ -1169,10 +1177,9 @@ def picks_dashboard():
     user can verify the long-run ROI numbers claimed by the backtest
     with the system's own live track record.
     """
-    from ganyan.db.models import Pick, Race, Track
+    from ganyan.db.models import Pick, Race
     from ganyan.predictor.picks import strategy_summary
     from sqlalchemy import desc
-    from sqlalchemy.orm import joinedload
 
     session = _get_session()
     try:
@@ -1265,7 +1272,7 @@ def advice_dashboard():
     which is historical P&L.
     """
     from datetime import datetime as _dt
-    from ganyan.db.models import Pick, Race, RaceStatus, Track
+    from ganyan.db.models import Pick, Race, RaceStatus
     from ganyan.predictor.kelly import (
         strategy_edge_stats, suggested_stake_tl, kelly_fraction,
     )
@@ -1276,7 +1283,10 @@ def advice_dashboard():
     from ganyan.predictor.trip_wire import compute_trip_wire, is_anomalous, is_halt
     from sqlalchemy.orm import joinedload
 
-    BETTING_STRATEGIES = ("uclu_top1", "uclu_box6", "sirali_ikili_top1")
+    # uclu_top1 dropped 2026-05-02: 0 hits on n=16 gated picks, ROI −100%.
+    # uclu_box6 kept (only form near takeout floor on gated races).
+    # sirali_ikili_top1 kept for visibility despite poor gated ROI.
+    BETTING_STRATEGIES = ("uclu_box6", "sirali_ikili_top1")
     STRATEGY_ORDER = {s: i for i, s in enumerate(BETTING_STRATEGIES)}
 
     date_str = request.args.get("date")

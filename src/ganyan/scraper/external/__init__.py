@@ -20,6 +20,7 @@ from .tjk_track_conditions import (
 )
 from .tjk_workouts import TjkWorkoutSource
 from .yarisrehberi import YarisRehberiTipsterSource
+from .openweather import OpenWeatherSource
 
 
 # Auto-register the bundled sources on import.  New sources should
@@ -29,6 +30,7 @@ register_source(TjkDisciplineSource)
 register_source(TjkWorkoutSource)
 register_source(TjkTrackConditionsSource)
 register_source(TjkStewardReportsSource)
+register_source(OpenWeatherSource)
 
 __all__ = [
     "ExternalSignalRow",

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import date as date_type, datetime
 
 import httpx
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
 from ganyan.db.models import Horse

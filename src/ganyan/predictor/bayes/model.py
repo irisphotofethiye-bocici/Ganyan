@@ -1,7 +1,6 @@
 """PyMC Plackett-Luce models — simple and hierarchical (vectorized)."""
 from __future__ import annotations
 
-import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 

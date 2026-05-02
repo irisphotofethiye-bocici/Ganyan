@@ -17,7 +17,6 @@ from sqlalchemy.orm import Session
 
 from ganyan.predictor.ml.features import (
     FEATURE_COLUMNS,
-    GROUP_COLUMN,
     TrainingFrame,
     build_training_frame,
 )

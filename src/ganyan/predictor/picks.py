@@ -1,23 +1,35 @@
 """Strategy-level bet ledger: generate picks and grade them later.
 
-Per race we record three Picks, one per strategy we actually recommend:
+Per race we record four Picks, one per strategy in :data:`STRATEGIES`.
+This ledger is audit-of-record and stays continuous across advice-list
+changes (e.g., a strategy that's been retired from the advice gate
+keeps writing rows here for ROI tracking).
 
-  - ``uclu_top1``        100 TL, one ticket,       backtest +150% ROI
-  - ``uclu_box6``        600 TL, 6 tickets (box),  backtest +112% ROI
-  - ``sirali_ikili_top1`` 100 TL, one ticket,      backtest  -2.7% ROI
+Live ledger ROI on graded picks since 2025-01-01 (as of 2026-05-02):
 
-``generate_picks_for_race()`` computes them from the current model's
+  - ``ganyan_top1``       1857 picks, 37.6% top-1 hit, ROI −19.9%
+  - ``uclu_top1``          854 picks,  3.9% hit,        ROI −32.7%
+  - ``uclu_box6``          854 picks, 13.6% hit,        ROI −5.3%
+  - ``sirali_ikili_top1`` 1857 picks, 12.4% hit,        ROI −12.5%
+
+The advice gate (CLI ``ganyan advice`` + web ``/advice``) advises a
+subset — see ``BETTING_STRATEGIES`` in ``cli/main.py:2031`` and
+``web/routes.py:1279``. Currently advice = ``("uclu_box6",
+"sirali_ikili_top1")``; ``uclu_top1`` was retired 2026-05-02 (gated
+ROI −100% on n=16). See ``feedback_advice_excludes_uclu_top1.md``.
+
+``generate_picks_for_race()`` computes picks from the current model's
 predicted probabilities and inserts a :class:`~ganyan.db.models.Pick`
-row each (idempotent — the ``(race_id, strategy)`` unique constraint
-prevents duplicates; re-running simply no-ops).
+row each. Idempotent — the ``(race_id, strategy)`` unique constraint
+prevents duplicates; re-running with ``refresh=True`` rewrites
+ungraded rows.
 
-``grade_race()`` fills in ``hit``, ``payout_tl``, ``net_tl`` using the
-scraped finish positions and TJK payouts, once the race is resulted.
+``grade_race()`` fills in ``hit``, ``payout_tl``, ``net_tl`` using
+the scraped finish positions and TJK payouts once the race resolves.
 """
 
 from __future__ import annotations
 
-import itertools
 import logging
 from datetime import datetime
 from typing import Iterable
@@ -26,7 +38,7 @@ from sqlalchemy.orm import Session
 
 from ganyan.db.models import Pick, Race, RaceEntry, RaceStatus
 from ganyan.predictor.exotics import (
-    Combo, ganyan_probabilities, sirali_ikili_probabilities,
+    ganyan_probabilities, sirali_ikili_probabilities,
     uclu_probabilities,
 )
 
@@ -37,6 +49,11 @@ logger = logging.getLogger(__name__)
 STAKE_PER_TICKET_TL = 100.0
 
 
+# Ledger set — every Pick row written by generate_picks_for_race uses
+# one of these.  Distinct from the *advice* set: BETTING_STRATEGIES
+# in cli/main.py:2031 and web/routes.py:1279 chooses a subset to surface
+# in /advice.  Keep this tuple unchanged when retiring a strategy from
+# advice — the ledger must stay continuous for ROI tracking.
 STRATEGIES = ("ganyan_top1", "uclu_top1", "uclu_box6", "sirali_ikili_top1")
 
 
@@ -245,16 +262,20 @@ def _actual_top3(entries: Iterable[RaceEntry]) -> tuple[int, ...] | None:
 def _strategy_hit(strategy: str, combination: list[int], actual: tuple[int, ...]) -> bool | None:
     """Did our combination match the actual finish for this strategy?"""
     if strategy == "ganyan_top1":
-        if len(actual) < 1: return None
+        if len(actual) < 1:
+            return None
         return combination[0] == actual[0]
     if strategy == "uclu_top1":
-        if len(actual) < 3: return None
+        if len(actual) < 3:
+            return None
         return tuple(combination) == actual[:3]
     if strategy == "uclu_box6":
-        if len(actual) < 3: return None
+        if len(actual) < 3:
+            return None
         return set(combination) == set(actual[:3])
     if strategy == "sirali_ikili_top1":
-        if len(actual) < 2: return None
+        if len(actual) < 2:
+            return None
         return tuple(combination) == actual[:2]
     return None
 

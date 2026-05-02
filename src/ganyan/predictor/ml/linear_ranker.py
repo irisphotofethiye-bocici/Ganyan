@@ -33,7 +33,6 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from ganyan.predictor.ml.features import (
-    FEATURE_COLUMNS,
     TrainingFrame,
     build_training_frame,
 )

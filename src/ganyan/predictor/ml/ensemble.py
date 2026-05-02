@@ -36,7 +36,7 @@ from ganyan.db.models import Prediction as PredictionRow, Race, RaceEntry
 from ganyan.predictor.bayesian import Prediction
 from ganyan.predictor.ml.features import build_race_frame
 from ganyan.predictor.ml.predictor import (
-    LoadedModel, MLPredictor, _confidence, _isnan, _softmax, load_latest_model,
+    LoadedModel, _softmax, load_latest_model,
 )
 from ganyan.predictor.ml.trainer import DEFAULT_MODEL_DIR
 

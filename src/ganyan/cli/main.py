@@ -4,10 +4,14 @@ import asyncio
 import logging
 import subprocess
 from datetime import date, datetime
+from typing import TYPE_CHECKING
 
 import typer
 
 from ganyan.config import get_settings
+
+if TYPE_CHECKING:
+    from ganyan.predictor.bayes.predictor import BayesPrediction
 
 app = typer.Typer(name="ganyan", help="Turkish horse racing prediction system")
 scrape_app = typer.Typer(help="Scrape race data from TJK")
@@ -313,7 +317,7 @@ def scrape_external(
             bound += bind_discipline_to_entries(session, target)
         if source == "tjk_workouts":
             bound += bind_workouts_to_entries(session, target)
-        if source in ("tjk_track_conditions", "tjk_steward_reports"):
+        if source in ("tjk_track_conditions", "tjk_steward_reports", "openweather"):
             bound += bind_track_conditions_to_races(session, target)
         session.commit()
     finally:
@@ -374,7 +378,6 @@ def _build_predictor(session, model: str):
             def predict_and_save(self, race_id):
                 # Persist by reusing MLPredictor's audit-row writer with
                 # the ensemble's "model_version".
-                from ganyan.predictor.ml import MLPredictor
                 from ganyan.db.models import RaceEntry, Prediction as PRow
                 preds = self.predict(race_id)
                 entries = {
@@ -946,7 +949,7 @@ def train_linear(
     typer.echo(f"Metadata:         {res.metadata_path}")
     typer.echo(f"Train races:      {res.train_races}")
     typer.echo(f"Holdout races:    {res.test_races}")
-    typer.echo(f"Metrics:")
+    typer.echo("Metrics:")
     for k, v in res.metrics.items():
         if isinstance(v, float):
             typer.echo(f"  {k:<22} {v:.3f}")
@@ -1343,7 +1346,7 @@ def exotics_cmd(
     from ganyan.db import get_session
     from ganyan.db.models import Race
     from ganyan.predictor.exotics import (
-        Combo, cumulative_coverage, dortlu_probabilities,
+        cumulative_coverage, dortlu_probabilities,
         ganyan_probabilities, ikili_probabilities, plase_probabilities,
         sirali_ikili_probabilities, top_n as top_n_fn, uclu_probabilities,
     )
@@ -1457,7 +1460,7 @@ def exotics_backtest_cmd(
 
     from ganyan.db import get_session
     from ganyan.predictor.exotic_evaluate import (
-        _COMBO_FUNCS, evaluate_all_pools, evaluate_pool,
+        _COMBO_FUNCS, evaluate_all_pools,
     )
 
     valid_pools = list(_COMBO_FUNCS.keys())
@@ -1732,7 +1735,7 @@ def picks_cmd(
     ),
     strategy: str = typer.Option(
         None, "--strategy",
-        help="Filter to a single strategy (uclu_top1 / uclu_box6 / sirali_ikili_top1).",
+        help="Filter to a single strategy (uclu_box6 / sirali_ikili_top1, or any in STRATEGIES for reference).",
     ),
     json_output: bool = typer.Option(False, "--json", help="Output JSON."),
 ) -> None:
@@ -1775,8 +1778,9 @@ def picks_cmd(
     # Bayesian-v3's track record (-11% ROI).  Post-rescrape head-to-head
     # on 303 held-out races showed LightGBM lifts it to +44% ROI, so it
     # is now a live betting strategy.
-    BETTING = {"uclu_top1", "uclu_box6", "sirali_ikili_top1"}
-    REFERENCE = {"ganyan_top1"}
+    # uclu_top1 dropped 2026-05-02: 0 hits on n=16 gated picks, ROI −100%.
+    BETTING = {"uclu_box6", "sirali_ikili_top1"}
+    REFERENCE = {"ganyan_top1", "uclu_top1"}
 
     header = (
         f"{'Strateji (TJK)':<28} {'N':>5} {'Hits':>5} {'Hit%':>6} "
@@ -1807,8 +1811,10 @@ def picks_cmd(
         for k in betting_keys:
             row = summary[k]
             typer.echo(_fmt(k, row))
-            agg_n += row["n"]; agg_hits += row["hits"]
-            agg_stake += row["stake_tl"]; agg_payout += row["payout_tl"]
+            agg_n += row["n"]
+            agg_hits += row["hits"]
+            agg_stake += row["stake_tl"]
+            agg_payout += row["payout_tl"]
             agg_net += row["net_tl"]
         if len(betting_keys) > 1:
             agg_hr = 100 * agg_hits / agg_n if agg_n else 0
@@ -1895,7 +1901,7 @@ def morning_cmd(
         typer.echo(f"      scrape failed: {exc}", err=True)
         raise typer.Exit(code=1)
 
-    typer.echo(f"[2/3] generating ML predictions + picks for today's races...")
+    typer.echo("[2/3] generating ML predictions + picks for today's races...")
     session = get_session()
     picks_created = 0
     predicted = 0
@@ -1921,12 +1927,12 @@ def morning_cmd(
                    f"created {picks_created} pick(s)")
 
         if grade:
-            typer.echo(f"[3/3] grading any already-resulted races...")
+            typer.echo("[3/3] grading any already-resulted races...")
             n = grade_all_pending(session)
             session.commit()
             typer.echo(f"      graded {n} pick(s)")
         else:
-            typer.echo(f"[3/3] grading skipped (--no-grade)")
+            typer.echo("[3/3] grading skipped (--no-grade)")
     finally:
         session.close()
 
@@ -1941,7 +1947,8 @@ def advice_cmd(
     ),
     min_prob: float = typer.Option(
         0.0, "--min-prob",
-        help="Only advise uclu_top1 when model top-1 probability >= this (%).",
+        help="Deprecated since 2026-05-02 (uclu_top1 retired from advice). "
+             "Kept for back-compat; has no effect on current strategies.",
     ),
     bankroll: float = typer.Option(
         10000.0, "--bankroll",
@@ -2027,7 +2034,8 @@ def advice_cmd(
     target_date = (
         _dt.strptime(date_str, "%Y-%m-%d").date() if date_str else _date.today()
     )
-    BETTING_STRATEGIES = ("uclu_top1", "uclu_box6", "sirali_ikili_top1")
+    # uclu_top1 dropped 2026-05-02: 0/16 hits on gated picks, ROI −100%.
+    BETTING_STRATEGIES = ("uclu_box6", "sirali_ikili_top1")
 
     bayes_idata = bayes_frame = None
     bayes_speed_history = None
@@ -2059,7 +2067,7 @@ def advice_cmd(
         if bayes_idata is None or bayes_frame is None:
             return None
         from ganyan.predictor.bayes.predictor import (
-            BayesPrediction, predict_from_posterior,
+            predict_from_posterior,
         )
         entries = list(race.entries)
         if len(entries) < 3:
@@ -2163,8 +2171,8 @@ def advice_cmd(
         if not races:
             typer.echo(f"{target_date} için yarış bulunamadı.")
             if target_date == _date.today():
-                typer.echo(f"  → uv run ganyan morning "
-                           f"(scrape + predict + generate picks)")
+                typer.echo("  → uv run ganyan morning "
+                           "(scrape + predict + generate picks)")
             else:
                 typer.echo(f"  → uv run ganyan scrape --backfill --rescrape "
                            f"--from {target_date} --to {target_date}")
@@ -2352,7 +2360,6 @@ def advice_cmd(
     n_races_advised = 0
     n_races_with_any_hit = 0
     total_payout = 0.0
-    skipped_low_prob = 0
     skipped_cohort = 0              # races skipped by --cohort-filter
     skipped_bayes = 0               # races skipped by --bayes-skip
     n_no_pool = 0                  # picks for strategies without a published pool
@@ -2415,19 +2422,10 @@ def advice_cmd(
                 continue
 
             prob = float(p.model_prob_pct) if p.model_prob_pct else 0.0
-            skip_reason = None
-            if strat == "uclu_top1" and prob < min_prob:
-                skip_reason = f"prob {prob:.1f}% < --min-prob {min_prob:.1f}%"
-
             names = " → ".join(p.combination_names) if p.combination_names else "?"
             if len(names) > 42:
                 names = names[:40] + "…"
             stake = float(p.stake_tl)
-
-            if skip_reason:
-                skipped_low_prob += 1
-                typer.echo(f"  [SKIP] {strat:<20} {names}  ({skip_reason})")
-                continue
 
             bet_mark = f"{stake:>4.0f} TL"
             outcome = ""
@@ -2439,7 +2437,7 @@ def advice_cmd(
                     outcome = f"  ✓ HIT  payout {pay:,.0f}"
                     total_payout += pay
                 else:
-                    outcome = f"  ✗ miss"
+                    outcome = "  ✗ miss"
             elif race.status == RaceStatus.resulted:
                 # Resulted but ungraded → pool wasn't published (no bet
                 # could've been placed / TJK would refund).  Don't count
@@ -2496,7 +2494,7 @@ def advice_cmd(
         typer.echo("")
 
     # Summary
-    typer.echo(f"--- SUMMARY ---")
+    typer.echo("--- SUMMARY ---")
     typer.echo(f"advised races          : {n_races_advised} / {len(races)}")
     typer.echo(f"total advised tickets  : {total_tickets}")
     typer.echo(f"advised stake (gross)  : {total_stake_advised:,.0f} TL")
@@ -2515,8 +2513,6 @@ def advice_cmd(
         typer.echo(f"net P&L                : {net:+,.0f} TL "
                    f"({sign}{roi:.1f}% ROI on effective stake)")
         typer.echo(f"races with any hit     : {n_races_with_any_hit}")
-    if skipped_low_prob:
-        typer.echo(f"skipped (low prob)     : {skipped_low_prob} picks")
     if skipped_cohort:
         typer.echo(f"skipped (cohort filter): {skipped_cohort} races "
                    f"(Maiden /Dişi · field≥13 · Şanlıurfa/Bursa)")

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date as date_type, datetime, timedelta
+from datetime import date as date_type, timedelta
 from typing import Iterable
 
 from sqlalchemy.orm import Session
@@ -470,7 +470,7 @@ def bind_track_conditions_to_races(
         session.query(ExternalSignal)
         .filter(
             ExternalSignal.source_name.in_(
-                ["tjk_track_conditions", "tjk_steward_reports"],
+                ["tjk_track_conditions", "tjk_steward_reports", "openweather"],
             ),
             ExternalSignal.race_id.is_(None),
         )
