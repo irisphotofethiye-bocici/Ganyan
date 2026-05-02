@@ -8,12 +8,21 @@ NULL counts look normal, but the model degrades. This canary catches
 distribution shifts that signal silent column-misalignment.
 
 Sets the halt flag on any of:
-- today's agf mean drifts >2pp from 7-day rolling mean per track
-- last_six string format match rate (must match ^[0-9KDÇ-]+$) drops below 95%
+- today's agf mean drifts >threshold pp from 7-day rolling mean per track
+- last_six string format match rate (must match ^[0-9KDÇ-]+$) drops below threshold
+
+Thresholds are env-overridable so operators can tune without redeploy:
+- ``GANYAN_AGF_DRIFT_PP`` — float, default 2.0
+- ``GANYAN_LAST_SIX_FORMAT_MIN`` — float in [0, 1], default 0.95
+
+All drifting tracks are logged on a single run, even if the first one
+trips the halt flag — silencing later tracks would hide concurrent
+column-misalignment in multiple cities.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from datetime import date, timedelta
@@ -26,8 +35,8 @@ from ganyan.predictor import halt_flag
 
 
 LAST_SIX_RE = re.compile(r"^[0-9KDÇ-]+$")
-AGF_DRIFT_PP_THRESHOLD = 2.0
-LAST_SIX_FORMAT_THRESHOLD = 0.95
+AGF_DRIFT_PP_THRESHOLD = float(os.environ.get("GANYAN_AGF_DRIFT_PP", "2.0"))
+LAST_SIX_FORMAT_THRESHOLD = float(os.environ.get("GANYAN_LAST_SIX_FORMAT_MIN", "0.95"))
 
 
 def _today_agf_per_track(session, today):
@@ -72,19 +81,31 @@ def main() -> int:
         today_agf = _today_agf_per_track(session, today)
         baseline_agf = _baseline_agf_per_track(session, today)
 
+        drifts = []
         for track_id, today_mean in today_agf.items():
             base = baseline_agf.get(track_id)
             if base is None:
                 continue
             drift = abs(today_mean - base)
             if drift > AGF_DRIFT_PP_THRESHOLD:
-                reason = (
-                    f"scrape_integrity: track {track_id} AGF mean drifted "
-                    f"{drift:.2f}pp ({today_mean:.2f} vs 7d baseline {base:.2f})"
-                )
-                halt_flag.set_halt(reason=reason, source="scrape_integrity_check")
-                print(reason, file=sys.stderr)
-                return 1
+                drifts.append((track_id, today_mean, base, drift))
+
+        for track_id, today_mean, base, drift in drifts:
+            print(
+                f"scrape_integrity: track {track_id} AGF mean drifted "
+                f"{drift:.2f}pp ({today_mean:.2f} vs 7d baseline {base:.2f})",
+                file=sys.stderr,
+            )
+
+        if drifts:
+            track_id, today_mean, base, drift = drifts[0]
+            reason = (
+                f"scrape_integrity: track {track_id} AGF mean drifted "
+                f"{drift:.2f}pp ({today_mean:.2f} vs 7d baseline {base:.2f})"
+                + (f"; {len(drifts) - 1} more drifting track(s) logged" if len(drifts) > 1 else "")
+            )
+            halt_flag.set_halt(reason=reason, source="scrape_integrity_check")
+            return 1
 
         format_rate = _last_six_format_rate(session, today)
         if format_rate < LAST_SIX_FORMAT_THRESHOLD:
