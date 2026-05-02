@@ -447,3 +447,60 @@ class MultiRacePool(Base):
     captured_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False,
     )
+
+
+class MultiRacePick(Base):
+    """A generated 6'lı / 5'lı / 7'lı coupon — horses kept per leg
+    plus the bet's stake and grading outcome.
+
+    Mirrors the single-race ``Pick`` table but keyed at program level.
+    ``kept_horses_per_leg`` is a JSON list-of-lists: each inner list is
+    the horse program-numbers (gate_number) kept for that leg of the
+    pool, in chronological race order.
+
+    Grading: ``hit`` is True only if every leg's actual winner appears
+    in the corresponding inner list. Dead-heat alternatives in
+    ``MultiRacePool.winning_combo`` (comma-separated within a leg)
+    count as multiple acceptable winners — any one is enough for that
+    leg to count as hit.
+    """
+
+    __tablename__ = "multi_race_picks"
+    __table_args__ = (
+        UniqueConstraint(
+            "date", "track_id", "pool_type", "pool_index", "strategy",
+            name="uq_multi_race_pick_date_track_type_idx_strat",
+        ),
+        Index("ix_multi_race_picks_date_track", "date", "track_id"),
+        Index("ix_multi_race_picks_graded", "graded"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    date: Mapped[date_type] = mapped_column(Date, nullable=False)
+    track_id: Mapped[int] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False,
+    )
+    pool_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    pool_index: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    strategy: Mapped[str] = mapped_column(String(50), nullable=False)
+    start_race_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_race_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    kept_horses_per_leg: Mapped[list] = mapped_column(JSON, nullable=False)
+    total_tickets: Mapped[int] = mapped_column(Integer, nullable=False)
+    ticket_unit_tl: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    stake_tl: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    conviction_per_leg: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False,
+    )
+    graded: Mapped[bool] = mapped_column(default=False)
+    hit: Mapped[bool | None] = mapped_column(nullable=True)
+    payout_tl: Mapped[float | None] = mapped_column(
+        Numeric(14, 2), nullable=True,
+    )
+    net_tl: Mapped[float | None] = mapped_column(
+        Numeric(14, 2), nullable=True,
+    )
+    graded_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True,
+    )

@@ -1686,6 +1686,109 @@ def uclu_picks_cmd(
         session.close()
 
 
+@app.command("multi-picks")
+def multi_picks_cmd(
+    race_date: str = typer.Option(
+        None, "--date",
+        help="Date of the card (YYYY-MM-DD). Defaults to today.",
+    ),
+    track_name: str = typer.Option(
+        ..., "--track",
+        help="Track name (e.g. 'İstanbul', 'İzmir', 'Ankara').",
+    ),
+    start_race_no: int = typer.Option(
+        1, "--start-race",
+        help="First leg's race number on the program (default 1).",
+    ),
+    pool_type: str = typer.Option(
+        "6li", "--pool-type",
+        help="'5li' / '6li' / '7li' (default 6li).",
+    ),
+    max_tickets: int = typer.Option(
+        512, "--max-tickets",
+        help="Budget cap on total combinations (default 512).",
+    ),
+    persist: bool = typer.Option(
+        False, "--persist",
+        help="Write the coupon to multi_race_picks (idempotent on date+track+pool+strategy).",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output JSON."),
+) -> None:
+    """Generate a 5'lı / 6'lı / 7'lı GANYAN coupon for a track-day window.
+
+    Asymmetric leg sizing: lock 1-2 horses where the model is confident,
+    spread 4-6 where it's uncertain, then shrink the widest legs until
+    the ticket-count product fits under --max-tickets.
+    """
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+
+    target = (
+        datetime.strptime(race_date, "%Y-%m-%d").date()
+        if race_date else date.today()
+    )
+
+    from ganyan.db import get_session
+    from ganyan.predictor.multi_race_picks import (
+        generate_coupon, persist_coupon,
+    )
+
+    session = get_session()
+    try:
+        draft = generate_coupon(
+            session, target, track_name, start_race_no,
+            pool_type=pool_type, max_tickets=max_tickets,
+        )
+        pick_id = None
+        if persist:
+            pick = persist_coupon(
+                session, target, track_name, start_race_no, draft,
+                pool_type=pool_type,
+            )
+            session.commit()
+            pick_id = pick.id
+
+        if json_output:
+            import json
+            typer.echo(json.dumps({
+                "date": target.isoformat(),
+                "track": track_name,
+                "pool_type": pool_type,
+                "start_race_no": start_race_no,
+                "end_race_no": start_race_no + len(draft.kept_horses_per_leg) - 1,
+                "kept_horses_per_leg": draft.kept_horses_per_leg,
+                "conviction_per_leg": draft.conviction_per_leg,
+                "total_tickets": draft.total_tickets,
+                "persisted_pick_id": pick_id,
+            }, indent=2))
+            return
+
+        leg_count = len(draft.kept_horses_per_leg)
+        end_race_no = start_race_no + leg_count - 1
+        typer.echo(
+            f"=== {pool_type.upper()} GANYAN — {track_name} {target} "
+            f"R{start_race_no}-R{end_race_no} ==="
+        )
+        typer.echo(
+            f"{'Leg':<6} {'Race':<6} {'Top-1 prob':>11}  {'Width':>5}  Kept (gate NOs)"
+        )
+        typer.echo("-" * 72)
+        for i, (kept, conv) in enumerate(
+            zip(draft.kept_horses_per_leg, draft.conviction_per_leg)
+        ):
+            kept_str = ", ".join(str(g) for g in kept)
+            typer.echo(
+                f"{i+1:<6} R{start_race_no + i:<5} {conv*100:>9.1f}%   "
+                f"{len(kept):>5}  {kept_str}"
+            )
+        typer.echo("")
+        typer.echo(f"Total combinations: {draft.total_tickets}")
+        if pick_id is not None:
+            typer.echo(f"Persisted as multi_race_picks.id={pick_id}")
+    finally:
+        session.close()
+
+
 # ---------------------------------------------------------------------------
 # daemon — standalone scheduler (no Flask)
 # ---------------------------------------------------------------------------
