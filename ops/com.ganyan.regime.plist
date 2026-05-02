@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ganyan.regime</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>python</string>
+    <string>/Users/fatihbozdag/Downloads/Cursor-Projects/ganyan/scripts/regime_monitor.py</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>23</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/fatihbozdag/Downloads/Cursor-Projects/ganyan/logs/regime_monitor.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/fatihbozdag/Downloads/Cursor-Projects/ganyan/logs/regime_monitor.err</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/fatihbozdag/Downloads/Cursor-Projects/ganyan</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
