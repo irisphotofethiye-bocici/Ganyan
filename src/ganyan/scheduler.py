@@ -338,9 +338,23 @@ def _job_results_poll(settings: Settings) -> None:
     finally:
         session.close()
 
+    session = get_session()
+    try:
+        from ganyan.predictor.multi_race_picks import grade_all_pending_multi
+
+        multi_graded = grade_all_pending_multi(session)
+        session.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("scheduler: multi-race pick grading failed")
+        session.rollback()
+        multi_graded = 0
+    finally:
+        session.close()
+
     logger.info(
-        "scheduler: results-poll done (%d races updated, %d picks graded)",
-        n, graded,
+        "scheduler: results-poll done (%d races updated, %d picks graded, "
+        "%d multi-race picks graded)",
+        n, graded, multi_graded,
     )
 
 

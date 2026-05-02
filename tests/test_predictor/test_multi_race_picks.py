@@ -15,7 +15,7 @@ from ganyan.db.models import (
 )
 from ganyan.predictor.multi_race_picks import (
     CouponDraft, _leg_width, _parse_winning_combo, _product, generate_coupon,
-    grade_pick, persist_coupon,
+    grade_all_pending_multi, grade_pick, multi_strategy_summary, persist_coupon,
 )
 
 
@@ -444,3 +444,101 @@ def test_grade_pick_ticket_unit_scales_payout(db_session):
     )
     grade_pick(db_session, pick)
     assert pick.payout_tl == pytest.approx(250.0)  # 100 * 2.5 * 1
+
+
+# ---------------------------------------------------------------------------
+# grade_all_pending_multi + multi_strategy_summary — batch grading + ROI agg
+# ---------------------------------------------------------------------------
+
+
+def test_grade_all_pending_multi_only_grades_resulted_pools(db_session):
+    target = date(2026, 5, 3)
+    track = Track(name="Bursa", city="Bursa", surface_types=["çim"])
+    db_session.add(track)
+    db_session.flush()
+
+    # Pool A: resulted.
+    db_session.add(MultiRacePool(
+        date=target, track_id=track.id, pool_type="6li", pool_index=1,
+        winning_combo="1/2/3/4/5/6", payout_tl=500.0,
+    ))
+    # Pool B: same date but pool_index=2, NOT resulted.
+    db_session.add(MultiRacePool(
+        date=target, track_id=track.id, pool_type="6li", pool_index=2,
+        winning_combo=None, payout_tl=None,
+    ))
+    db_session.flush()
+
+    # Pick A (matches pool A): hits.
+    pick_a = MultiRacePick(
+        date=target, track_id=track.id, pool_type="6li", pool_index=1,
+        strategy="asymmetric_v1", start_race_no=1, end_race_no=6,
+        kept_horses_per_leg=[[1], [2], [3], [4], [5], [6]],
+        total_tickets=1, ticket_unit_tl=1.0, stake_tl=1.0,
+        conviction_per_leg=[0.6] * 6,
+    )
+    # Pick B (matches pool B): pool not resulted yet, should stay ungraded.
+    pick_b = MultiRacePick(
+        date=target, track_id=track.id, pool_type="6li", pool_index=2,
+        strategy="asymmetric_v1", start_race_no=4, end_race_no=9,
+        kept_horses_per_leg=[[1], [2], [3], [4], [5], [6]],
+        total_tickets=1, ticket_unit_tl=1.0, stake_tl=1.0,
+        conviction_per_leg=[0.6] * 6,
+    )
+    db_session.add(pick_a)
+    db_session.add(pick_b)
+    db_session.flush()
+
+    n = grade_all_pending_multi(db_session)
+    assert n == 1
+    db_session.refresh(pick_a)
+    db_session.refresh(pick_b)
+    assert pick_a.graded is True
+    assert pick_a.hit is True
+    assert pick_b.graded is False
+
+
+def test_multi_strategy_summary_aggregates_roi(db_session):
+    target = date(2026, 5, 3)
+    track = Track(name="Adana", city="Adana", surface_types=["kum"])
+    db_session.add(track)
+    db_session.flush()
+
+    # Two graded picks: one hit (paid 1000), one miss.
+    db_session.add(MultiRacePick(
+        date=target, track_id=track.id, pool_type="6li", pool_index=1,
+        strategy="asymmetric_v1", start_race_no=1, end_race_no=6,
+        kept_horses_per_leg=[[1]] * 6,
+        total_tickets=1, ticket_unit_tl=1.0, stake_tl=1.0,
+        conviction_per_leg=[0.6] * 6,
+        graded=True, hit=True, payout_tl=1000.0, net_tl=999.0,
+    ))
+    db_session.add(MultiRacePick(
+        date=target, track_id=track.id, pool_type="6li", pool_index=2,
+        strategy="asymmetric_v1", start_race_no=4, end_race_no=9,
+        kept_horses_per_leg=[[1]] * 6,
+        total_tickets=1, ticket_unit_tl=1.0, stake_tl=1.0,
+        conviction_per_leg=[0.6] * 6,
+        graded=True, hit=False, payout_tl=0.0, net_tl=-1.0,
+    ))
+    # Plus one ungraded — should be skipped.
+    db_session.add(MultiRacePick(
+        date=target, track_id=track.id, pool_type="6li", pool_index=3,
+        strategy="asymmetric_v1", start_race_no=7, end_race_no=12,
+        kept_horses_per_leg=[[1]] * 6,
+        total_tickets=1, ticket_unit_tl=1.0, stake_tl=1.0,
+        conviction_per_leg=[0.6] * 6,
+        graded=False,
+    ))
+    db_session.flush()
+
+    summary = multi_strategy_summary(db_session)
+    assert "asymmetric_v1" in summary
+    row = summary["asymmetric_v1"]
+    assert row["n"] == 2
+    assert row["hits"] == 1
+    assert row["stake_tl"] == pytest.approx(2.0)
+    assert row["payout_tl"] == pytest.approx(1000.0)
+    assert row["net_tl"] == pytest.approx(998.0)
+    assert row["hit_rate_pct"] == pytest.approx(50.0)
+    assert row["roi_pct"] == pytest.approx(998.0 / 2.0 * 100)

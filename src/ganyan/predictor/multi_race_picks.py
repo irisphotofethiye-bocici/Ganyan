@@ -302,3 +302,64 @@ def grade_pick(
     pick.graded_at = datetime.now(timezone.utc).replace(tzinfo=None)
     session.flush()
     return all_hit
+
+
+def multi_strategy_summary(
+    session: Session, *, strategy: str | None = None, since=None,
+) -> dict:
+    """Aggregate ROI per strategy over graded multi-race picks.
+
+    Returns the same shape as ``ganyan.predictor.picks.strategy_summary``::
+
+        {
+          "asymmetric_v1": {n, hits, stake_tl, payout_tl, net_tl,
+                            roi_pct, hit_rate_pct},
+          ...
+        }
+    """
+    q = session.query(MultiRacePick).filter(
+        MultiRacePick.graded == True,  # noqa: E712
+    )
+    if strategy:
+        q = q.filter(MultiRacePick.strategy == strategy)
+    if since is not None:
+        q = q.filter(MultiRacePick.generated_at >= since)
+
+    agg: dict[str, dict] = {}
+    for p in q.all():
+        row = agg.setdefault(p.strategy, {
+            "n": 0, "hits": 0, "stake_tl": 0.0, "payout_tl": 0.0, "net_tl": 0.0,
+        })
+        row["n"] += 1
+        row["stake_tl"] += float(p.stake_tl)
+        if p.hit:
+            row["hits"] += 1
+        if p.payout_tl is not None:
+            row["payout_tl"] += float(p.payout_tl)
+        if p.net_tl is not None:
+            row["net_tl"] += float(p.net_tl)
+
+    for row in agg.values():
+        row["hit_rate_pct"] = (row["hits"] / row["n"]) * 100 if row["n"] else 0
+        row["roi_pct"] = (row["net_tl"] / row["stake_tl"]) * 100 if row["stake_tl"] else 0
+    return agg
+
+
+def grade_all_pending_multi(session: Session) -> int:
+    """Grade every ungraded MultiRacePick whose pool has a winning_combo.
+
+    Mirrors ``ganyan.predictor.picks.grade_all_pending`` for the
+    program-level multi-race coupons. Returns the number of picks
+    actually graded (i.e., whose pool was resulted at scan time).
+    """
+    pending = (
+        session.query(MultiRacePick)
+        .filter(MultiRacePick.graded == False)  # noqa: E712
+        .all()
+    )
+    graded = 0
+    for pick in pending:
+        outcome = grade_pick(session, pick)
+        if outcome is not None:
+            graded += 1
+    return graded

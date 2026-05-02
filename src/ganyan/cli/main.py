@@ -1789,6 +1789,57 @@ def multi_picks_cmd(
         session.close()
 
 
+@app.command("multi-grade")
+def multi_grade_cmd(
+    json_output: bool = typer.Option(False, "--json", help="Output JSON."),
+) -> None:
+    """Grade every pending MultiRacePick whose pool has resulted.
+
+    Idempotent — runs on every results-poll already; this command is
+    for manual catch-up after rescraping pool payouts.
+    """
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+
+    from ganyan.db import get_session
+    from ganyan.predictor.multi_race_picks import (
+        grade_all_pending_multi, multi_strategy_summary,
+    )
+
+    session = get_session()
+    try:
+        n = grade_all_pending_multi(session)
+        session.commit()
+        summary = multi_strategy_summary(session)
+    finally:
+        session.close()
+
+    if json_output:
+        import json
+        typer.echo(json.dumps({
+            "graded_now": n, "summary": summary,
+        }, indent=2, default=str))
+        return
+
+    typer.echo(f"Graded {n} multi-race pick(s).")
+    if not summary:
+        typer.echo("(no graded multi-race picks yet)")
+        return
+    typer.echo(
+        f"\n{'Strategy':<20} {'N':>5} {'Hits':>5} "
+        f"{'Stake TL':>12} {'Payout TL':>12} {'Net TL':>12} "
+        f"{'Hit %':>6} {'ROI %':>7}"
+    )
+    typer.echo("-" * 96)
+    for strat, row in summary.items():
+        typer.echo(
+            f"{strat:<20} {row['n']:>5} {row['hits']:>5} "
+            f"{row['stake_tl']:>12.2f} {row['payout_tl']:>12.2f} "
+            f"{row['net_tl']:>12.2f} {row['hit_rate_pct']:>6.2f} "
+            f"{row['roi_pct']:>7.2f}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # daemon — standalone scheduler (no Flask)
 # ---------------------------------------------------------------------------
