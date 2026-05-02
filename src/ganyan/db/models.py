@@ -365,3 +365,42 @@ class Prediction(Base):
     probability: Mapped[float] = mapped_column(Numeric(6, 3), nullable=False)
     confidence: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
     factors: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class RegimeDaily(Base):
+    """Per-strategy daily snapshot of implied takeout / pool size / realized payouts.
+
+    Closes premortem failure mode 08 — the probability-to-payout mapping
+    (takeout, pool composition) is non-stationary; the model has no view of it.
+    The regime monitor writes one row per (date, strategy) summarizing how the
+    real pool behaved versus what the model expected.
+    """
+
+    __tablename__ = "regime_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_date", "strategy", name="uq_regime_daily_date_strategy",
+        ),
+        Index("ix_regime_daily_snapshot_date", "snapshot_date"),
+        Index("ix_regime_daily_strategy", "strategy"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    snapshot_date: Mapped[date_type] = mapped_column(Date, nullable=False)
+    strategy: Mapped[str] = mapped_column(String(50), nullable=False)
+    n_winning: Mapped[int] = mapped_column(Integer, nullable=False)
+    mean_payout_tl: Mapped[float | None] = mapped_column(
+        Numeric(12, 2), nullable=True,
+    )
+    mean_pool_proxy_tl: Mapped[float | None] = mapped_column(
+        Numeric(14, 2), nullable=True,
+    )
+    implied_takeout: Mapped[float | None] = mapped_column(
+        Numeric(6, 4), nullable=True,
+    )
+    realized_vs_expected: Mapped[float | None] = mapped_column(
+        Numeric(6, 4), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False,
+    )
