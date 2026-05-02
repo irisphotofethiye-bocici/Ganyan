@@ -48,6 +48,18 @@ uv run pytest tests/ -v
 uv run pytest tests/test_predictor/test_bayesian.py::test_probabilities_sum_to_100 -v
 ```
 
+## Critical invariants (read before consulting /advice for a real bet)
+
+1. **Model beats chance ≠ bets have edge.** The 2026-05-02 chance-hypothesis settlement proved the model has 3-17× lift over random (p≈0). The same date's OOS retest proved real kept-race ROI is **−20% to −30% on uclu_box6 and sirali_ikili_top1** — the takeout floor. These are independent claims. The advice gate filters for confidence, not edge after takeout.
+
+2. **The halt flag is authoritative.** `/tmp/ganyan-halt.flag` (or `$GANYAN_HALT_FLAG_PATH`) is set by canaries (rolling-PnL, uniformity guard, heartbeat, scrape integrity, regime monitor). When set, `/advice` and `ganyan advice` suppress Kelly stakes. Manually clear with `rm /tmp/ganyan-halt.flag` only after investigating the reason.
+
+3. **OOS bar: ≥365 days AND ≥1500 races.** Set by the V2 retraction (2026-05-02). Enforced in `logs/discordance_oos_backtest.py:assert_min_window`. Do not bypass.
+
+4. **Kill date for advice-as-betting-tool: 2026-09-01.** If by that date no kept-bet subset has ≥ +0.5% replicated OOS ROI on a clean window, the betting layer retires permanently (suppress all stake_tl rendering by default). Project continues as a research instrument; real money flow stops.
+
+5. **Frame around winning horse and winning bet, not payout/ROI** — primary metric is top-1 hit rate. (Existing memory; reaffirmed here.)
+
 ## Architecture
 
 Three-layer service-oriented monorepo sharing PostgreSQL:
@@ -93,6 +105,16 @@ When discussing model or strategy performance, frame around the **winning horse*
 - **Tertiary** (only when sizing strategy or explicitly asked): payout/ROI/net-TL
 
 Payout reflects TJK pool dynamics (takeout, retail behavior, "devren" carryovers) more than model quality. A 33% top-1 day on short-priced favorites shows −25% ROI because the math doesn't work at 1.9× average odds — but the model is doing its job. Don't anchor model-quality reports on money.
+
+## Maintenance routines
+
+| Cadence | Task | How |
+| --- | --- | --- |
+| Daily 12:00 | Heartbeat (liveness + uniformity) | `launchctl list \| grep com.ganyan.heartbeat` |
+| Daily 12:30 | Scrape integrity (AGF drift) | `launchctl list \| grep com.ganyan.integrity` |
+| Daily 23:30 | Regime monitor (takeout drift) | `launchctl list \| grep com.ganyan.regime` |
+| Weekly | Commit-ratio audit (ganyan vs linguistic) | `git log --since="7 days ago" --oneline \| wc -l` in each repo; if ganyan > 5× linguistic for 2 consecutive weeks, force a Ganyan freeze week |
+| 2026-09-01 (one-off) | Kill-date check for advice betting | Run `discordance_oos_backtest.py` on the 2026-05-02 → 2026-08-31 window per kept-bet subset; if no subset has ≥ +0.5% ROI, retire the betting layer |
 
 # CLAUDE.md
 
