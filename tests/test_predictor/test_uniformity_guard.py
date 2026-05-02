@@ -1,5 +1,3 @@
-import pytest
-
 from ganyan.predictor import uniformity_guard
 
 
