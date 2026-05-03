@@ -126,6 +126,16 @@ class MLPredictor:
         if frame.empty:
             return []
 
+        # Drop scratched horses so softmax + sort run only over runners.
+        scratched_hids = {
+            int(e.horse_id) for e in race.entries
+            if getattr(e, "scratched", False)
+        }
+        if scratched_hids:
+            frame = frame[~frame["horse_id"].isin(scratched_hids)].reset_index(drop=True)
+            if frame.empty:
+                return []
+
         X = frame.reindex(columns=self.model.feature_columns).astype("float64")
         raw_scores = self.model.booster.predict(X)
 

@@ -1,3 +1,6 @@
+# Worktrees (isolated execution workspaces)
+.worktrees/
+
 # Python
 __pycache__/
 *.py[cod]

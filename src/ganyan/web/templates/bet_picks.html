@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Bahis Önerileri — {{ target_date }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h2 class="mb-0">Bahis Önerileri — {{ target_date.strftime("%d.%m.%Y") }}</h2>
+    <div class="small text-muted">
+        Modelin her bahis tipi için kazanan tahmini — Tek, Plase, İkili, Üçlü, 4'lü
+    </div>
+</div>
+
+{% if not items %}
+<div class="alert alert-info">
+    Bugün için tahmin üretilmedi. Modeller henüz eğitilmemiş olabilir.
+</div>
+{% endif %}
+
+{% for item in items %}
+<div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <div>
+            <strong>{{ item.track_name }} R{{ item.race.race_number }}</strong>
+            {% if item.race.post_time %}
+            <span class="text-muted ms-2">{{ item.race.post_time }}</span>
+            {% endif %}
+            <a href="/races/{{ item.race.id }}/predict" class="ms-3 small">tüm sıralama →</a>
+        </div>
+        <div class="small text-muted">race_id={{ item.race.id }}</div>
+    </div>
+    <div class="card-body p-2">
+        <table class="table table-sm mb-0 align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th class="ps-3">Bahis Tipi</th>
+                    <th>Seçim</th>
+                    <th class="text-end" style="width: 5rem">Bilet</th>
+                    <th class="text-end" style="width: 5rem">Birim</th>
+                    <th class="text-end" style="width: 6rem">Toplam</th>
+                    <th class="text-end" style="width: 6rem">Olasılık</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in item.recommendations %}
+                <tr>
+                    <td class="ps-3">
+                        <strong>{{ r.label }}</strong>
+                        {% if r.note %}
+                        <div class="small text-muted">{{ r.note }}</div>
+                        {% endif %}
+                    </td>
+                    <td class="font-monospace">
+                        {% if r.spread_groups %}
+                            {% for grp in r.spread_groups %}
+                                {% if loop.index0 == 0 %}
+                                    <span class="badge bg-success">{{ grp[0] }}</span>
+                                {% else %}
+                                    <span class="text-muted">,</span>
+                                    {{ grp | join(' | ') }}
+                                {% endif %}
+                            {% endfor %}
+                        {% elif r.separator == "→" %}
+                            {{ r.horses | join(' → ') }}
+                        {% elif r.separator == "/" %}
+                            {{ r.horses | join(' / ') }}
+                        {% elif r.separator == "K" %}
+                            {{ r.horses | join(' + ') }}<small class="text-muted ms-1">K</small>
+                        {% else %}
+                            {{ r.horses | join(' ') }}
+                        {% endif %}
+                    </td>
+                    <td class="text-end font-monospace">{{ r.tickets }}</td>
+                    <td class="text-end font-monospace">{{ '%.1f'|format(r.birim_tl) }}</td>
+                    <td class="text-end font-monospace">{{ '%.1f'|format(r.stake_tl) }}</td>
+                    <td class="text-end font-monospace text-primary">
+                        %{{ '%.2f'|format(r.model_prob_pct) }}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endfor %}
+
+{% endblock %}

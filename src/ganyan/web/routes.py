@@ -357,10 +357,22 @@ def predict_race(race_id: int):
                 "n_samples": len(snaps),
             }
 
-        recommendations = _build_bet_recommendations(
-            race, predictions, ikili_probabilities,
-            sirali_ikili_probabilities, uclu_probabilities,
+        from ganyan.predictor.bet_recommendations import (
+            compute_bet_recommendations,
         )
+        win_probs = {
+            p.horse_id: max(p.probability, 0.0) / 100.0 for p in predictions
+        }
+        horse_names = {p.horse_id: p.horse_name for p in predictions}
+        gates = {
+            e.horse_id: int(e.gate_number) for e in entries
+            if e.gate_number is not None
+        }
+        bet_picks = [
+            r.to_dict() for r in
+            compute_bet_recommendations(win_probs, horse_names, gates)
+        ]
+        recommendations = bet_picks  # legacy template key
 
         if _wants_json():
             return jsonify(
@@ -1996,6 +2008,88 @@ def multi_picks_page():
             coupons=coupons,
             skipped=skipped,
             recent_picks=recent_picks,
+        )
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /bet-picks — Per-race recommendations for every TJK structure
+# ---------------------------------------------------------------------------
+
+
+@bp.route("/bet-picks")
+def bet_picks_page():
+    """One-page view of bet recommendations for every race on a date.
+
+    For each race, shows the model's pick across every TJK structure:
+    Tek/Ganyan, Plase, Sıralı İkili, İkili, Üçlü Sıralı, Üçlü Komple-3,
+    Üçlü Sıralı Virgüllü, 4'lü Sıralı. Aligned with the master directive
+    (2026-05-03): pick winners across all bet types.
+    """
+    from ganyan.predictor.bet_recommendations import compute_bet_recommendations
+    from ganyan.predictor.ml.ensemble import EnsemblePredictor
+    from ganyan.db.models import RaceEntry, Track
+
+    target_qs = request.args.get("date")
+    target = (
+        datetime.strptime(target_qs, "%Y-%m-%d").date()
+        if target_qs else date.today()
+    )
+
+    session = _get_session()
+    try:
+        races = (
+            session.query(Race)
+            .filter(Race.date == target)
+            .order_by(Race.post_time.asc().nullslast(), Race.race_number.asc())
+            .all()
+        )
+
+        try:
+            predictor = EnsemblePredictor(session)
+        except FileNotFoundError:
+            predictor = None
+
+        items: list[dict] = []
+        for race in races:
+            if predictor is None:
+                continue
+            preds = predictor.predict(race.id)
+            if not preds:
+                continue
+            entries = (
+                session.query(RaceEntry).filter(RaceEntry.race_id == race.id).all()
+            )
+            gates = {
+                e.horse_id: int(e.gate_number) for e in entries
+                if e.gate_number is not None
+            }
+            win_probs = {p.horse_id: p.mean_probability / 100.0 for p in preds}
+            names = {p.horse_id: p.horse_name for p in preds}
+            recs = compute_bet_recommendations(win_probs, names, gates)
+            items.append({
+                "race": race,
+                "track_name": race.track.name if race.track else "?",
+                "recommendations": [r.to_dict() for r in recs],
+            })
+
+        if _wants_json():
+            return jsonify({
+                "date": target.isoformat(),
+                "items": [
+                    {
+                        "race_id": it["race"].id,
+                        "track": it["track_name"],
+                        "race_number": it["race"].race_number,
+                        "recommendations": it["recommendations"],
+                    }
+                    for it in items
+                ],
+            })
+
+        return render_template(
+            "bet_picks.html", target_date=target, items=items,
         )
     finally:
         session.close()

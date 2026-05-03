@@ -1,6 +1,7 @@
 """Ganyan CLI — Turkish horse racing prediction system."""
 
 import asyncio
+import json
 import logging
 import subprocess
 from datetime import date, datetime
@@ -1682,6 +1683,118 @@ def uclu_picks_cmd(
         )
         if skipped:
             typer.echo(f"({skipped} race(s) skipped: missing predictions or field < 3)")
+    finally:
+        session.close()
+
+
+@app.command("bet-picks")
+def bet_picks_cmd(
+    race_id: int = typer.Argument(
+        None,
+        help="Specific race ID. If omitted, lists every race on --date.",
+    ),
+    race_date: str = typer.Option(
+        None, "--date",
+        help="Date of the card (YYYY-MM-DD). Defaults to today.",
+    ),
+    track: str = typer.Option(
+        None, "--track", help="Filter by track name (case-insensitive)."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output JSON."),
+) -> None:
+    """Per-race bet recommendations across every TJK structure.
+
+    Shows the model's pick for: Tek/Ganyan, Plase, Sıralı İkili, İkili,
+    Üçlü Sıralı, Üçlü Komple-3, Üçlü Sıralı Virgüllü, 4'lü Sıralı.
+    For each, prints horses (gate NO), ticket count, birim TL, total TL,
+    and the model's combination probability.
+    """
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+
+    from ganyan.db import get_session
+    from ganyan.db.models import Race, RaceEntry, Track
+    from ganyan.predictor.bet_recommendations import compute_bet_recommendations
+    from ganyan.predictor.ml.ensemble import EnsemblePredictor
+
+    target = (
+        datetime.strptime(race_date, "%Y-%m-%d").date()
+        if race_date else date.today()
+    )
+
+    session = get_session()
+    try:
+        if race_id is not None:
+            races = [session.get(Race, race_id)]
+            if races[0] is None:
+                typer.echo(f"Race {race_id} not found.")
+                raise typer.Exit(1)
+        else:
+            q = session.query(Race).filter(Race.date == target)
+            if track:
+                q = q.join(Track).filter(Track.name.ilike(track))
+            races = q.order_by(Race.post_time.asc(), Race.race_number.asc()).all()
+
+        if not races:
+            typer.echo(f"No races for {target}.")
+            return
+
+        try:
+            predictor = EnsemblePredictor(session)
+        except FileNotFoundError:
+            typer.echo("No trained models found. Run `ganyan train` first.")
+            raise typer.Exit(1)
+
+        all_out: list[dict] = []
+        for race in races:
+            preds = predictor.predict(race.id)
+            if not preds:
+                continue
+            entries = (
+                session.query(RaceEntry).filter(RaceEntry.race_id == race.id).all()
+            )
+            gates = {
+                e.horse_id: int(e.gate_number) for e in entries
+                if e.gate_number is not None
+            }
+            win_probs = {p.horse_id: p.mean_probability / 100.0 for p in preds}
+            names = {p.horse_id: p.horse_name for p in preds}
+            recs = compute_bet_recommendations(win_probs, names, gates)
+            track_name = race.track.name if race.track else "?"
+            all_out.append({
+                "race_id": race.id,
+                "track": track_name,
+                "race_number": race.race_number,
+                "post_time": (
+                    race.post_time.isoformat()
+                    if hasattr(race.post_time, "isoformat") else
+                    str(race.post_time) if race.post_time else None
+                ),
+                "recommendations": [r.to_dict() for r in recs],
+            })
+
+        if json_output:
+            typer.echo(json.dumps(all_out, ensure_ascii=False, indent=2))
+            return
+
+        for item in all_out:
+            typer.echo(f"\n=== {item['track']} R{item['race_number']} (race_id={item['race_id']}) ===")
+            for r in item["recommendations"]:
+                horses = (
+                    " → ".join(str(h) for h in r["horses"]) if r["separator"] == "→"
+                    else " / ".join(str(h) for h in r["horses"]) if r["separator"] == "/"
+                    else " ".join(str(h) for h in r["horses"])
+                )
+                if r.get("spread_groups"):
+                    horses = " , ".join(
+                        " | ".join(g) for g in r["spread_groups"]
+                    )
+                typer.echo(
+                    f"  {r['label']:38s} {horses:30s}  "
+                    f"{r['tickets']:>3} bilet × {r['birim_tl']:>4.1f} TL "
+                    f"= {r['stake_tl']:>7.1f} TL  "
+                    f"P=%{r['model_prob_pct']:>5.2f}"
+                )
     finally:
         session.close()
 

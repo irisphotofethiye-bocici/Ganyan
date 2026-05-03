@@ -136,6 +136,12 @@ def _refresh_entry_fields(existing: RaceEntry, h) -> None:
         existing.finish_position = h.finish_position
     if getattr(h, "finish_time", None) is not None:
         existing.finish_time = h.finish_time
+    # ``scratched`` is a bool so the None-skip rule above doesn't apply.
+    # Always sync it from the latest parse so a horse that was active
+    # in the morning but later marked Koşmaz flips correctly, and a
+    # horse that was Koşmaz but reinstated flips back.
+    if hasattr(h, "scratched"):
+        existing.scratched = bool(h.scratched)
 
 
 def _fetch_horses_by_names(session: Session, names: list[str]) -> dict[str, Horse]:
@@ -262,6 +268,7 @@ def store_race_card(session: Session, parsed: ParsedRaceCard) -> Race:
             equipment=h.equipment,
             finish_position=h.finish_position,
             finish_time=h.finish_time,
+            scratched=getattr(h, "scratched", False),
         )
         session.add(entry)
         # Flush so the new entry has an id before snapshotting AGF.

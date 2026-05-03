@@ -36,6 +36,10 @@ class RawHorseEntry:
     # from the <sup> tags on the horse name cell.  Domain handicappers
     # consider first-time equipment a major form-change signal.
     equipment: str | None = None
+    # True when TJK marks the horse as "(Koşmaz)" pre-race — i.e.
+    # withdrawn from the field. Predictor must exclude scratched
+    # horses and renormalise win probabilities across the runners.
+    scratched: bool = False
 
 
 @dataclass
@@ -99,6 +103,7 @@ class ParsedHorseEntry:
     finish_time: str | None = None
     tjk_at_id: int | None = None
     equipment: str | None = None
+    scratched: bool = False
 
 
 @dataclass
@@ -273,6 +278,7 @@ def parse_race_card(raw: RawRaceCard) -> ParsedRaceCard:
             finish_time=h.finish_time,
             tjk_at_id=h.tjk_at_id,
             equipment=h.equipment,
+            scratched=getattr(h, "scratched", False),
         ))
 
     return ParsedRaceCard(

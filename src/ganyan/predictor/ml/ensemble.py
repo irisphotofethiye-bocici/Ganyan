@@ -216,10 +216,22 @@ class EnsemblePredictor:
         if frame.empty:
             return []
 
-        entries_by_id = {e.horse_id: e for e in race.entries}
+        # Drop scratched horses pre-prediction so the softmax + sort
+        # operate over only the actual runners. The probability mass
+        # of scratched horses redistributes naturally.
+        scratched_hids = {
+            int(e.horse_id) for e in race.entries
+            if getattr(e, "scratched", False)
+        }
+        if scratched_hids:
+            frame = frame[~frame["horse_id"].isin(scratched_hids)].reset_index(drop=True)
+            if frame.empty:
+                return []
+
+        entries_by_id = {e.horse_id: e for e in race.entries if e.horse_id not in scratched_hids}
         agf_by_hid = {
             e.horse_id: float(e.agf) if e.agf is not None else -1.0
-            for e in race.entries
+            for e in race.entries if e.horse_id not in scratched_hids
         }
         horse_ids = [int(h) for h in frame["horse_id"]]
 

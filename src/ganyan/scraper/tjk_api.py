@@ -1190,6 +1190,16 @@ class TJKClient:
         age_text = _extract_text(row.select_one(_P_AGE))
         eid_text = _extract_eid(row.select_one(_P_EID))
 
+        # Scratched ("Koşmaz") horses appear with `<font color=red>(Koşmaz)</font>`
+        # inside the horse-name cell. The row otherwise looks normal —
+        # gate, jockey, agf etc. all populated. Detection is a string
+        # check on the cell HTML so it survives minor markup changes.
+        scratched = False
+        if name_cell is not None:
+            cell_html = str(name_cell)
+            if "Koşmaz" in cell_html or "Kosmaz" in cell_html:
+                scratched = True
+
         return RawHorseEntry(
             name=name,
             age=_parse_age(age_text),
@@ -1208,6 +1218,7 @@ class TJKClient:
             last_six=_extract_text(row.select_one(_P_LAST6)) or None,
             tjk_at_id=_extract_at_id(name_cell),
             equipment=_extract_equipment(name_cell),
+            scratched=scratched,
         )
 
     def _parse_result_row(self, row: Tag) -> RawHorseEntry | None:

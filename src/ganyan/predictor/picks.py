@@ -111,11 +111,17 @@ def generate_picks_for_race(
     win_probs: dict[int, float] = {}
     name_for: dict[int, str] = {}
     for e in entries:
+        if getattr(e, "scratched", False):
+            continue
         if e.predicted_probability is not None:
             win_probs[e.horse_id] = max(float(e.predicted_probability), 0.0) / 100.0
             name_for[e.horse_id] = e.horse.name if e.horse else "?"
     if sum(win_probs.values()) <= 0:
         return []
+    # Renormalise so probabilities sum to 1 across remaining runners.
+    total = sum(win_probs.values())
+    if total > 0:
+        win_probs = {h: v / total for h, v in win_probs.items()}
 
     if refresh:
         # Delete ungraded picks so we can regenerate from fresh probs.

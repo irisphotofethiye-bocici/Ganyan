@@ -3,7 +3,7 @@ from datetime import date as date_type, datetime
 
 from sqlalchemy import (
     String, SmallInteger, Integer, Numeric, Date, DateTime, Enum, JSON, Text,
-    ForeignKey, UniqueConstraint, Index, func,
+    ForeignKey, UniqueConstraint, Index, Boolean, func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -156,6 +156,10 @@ class RaceEntry(Base):
     finish_time: Mapped[str | None] = mapped_column(String(20))
     performance_score: Mapped[float | None] = mapped_column(Numeric(5, 2))
     predicted_probability: Mapped[float | None] = mapped_column(Numeric(5, 2))
+    # Pre-race scratch flag — set by the scraper when the TJK program
+    # marks the horse as "(Koşmaz)". Predictor + bet recommendations
+    # exclude scratched entries and renormalise win probabilities.
+    scratched: Mapped[bool] = mapped_column(Boolean, server_default="false", default=False)
 
     race: Mapped["Race"] = relationship(back_populates="entries")
     horse: Mapped["Horse"] = relationship(back_populates="entries")
