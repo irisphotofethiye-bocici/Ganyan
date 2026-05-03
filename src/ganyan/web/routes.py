@@ -1843,6 +1843,12 @@ def multi_picks_page():
         if target_qs else date.today()
     )
 
+    try:
+        max_tickets = int(request.args.get("max_tickets", "512"))
+    except ValueError:
+        max_tickets = 512
+    max_tickets = max(50, min(max_tickets, 2000))
+
     session = _get_session()
     try:
         tracks = (
@@ -1892,7 +1898,7 @@ def multi_picks_page():
                     try:
                         draft = generate_coupon(
                             session, target, track_name, start_race_no,
-                            pool_type=pool_type, max_tickets=512,
+                            pool_type=pool_type, max_tickets=max_tickets,
                         )
                     except ValueError as exc:
                         skipped.append({
@@ -1971,6 +1977,7 @@ def multi_picks_page():
         if _wants_json():
             return jsonify({
                 "date": target.isoformat(),
+                "max_tickets": max_tickets,
                 "coupons": [
                     {**c, "legs": [{**leg} for leg in c["legs"]]}
                     for c in coupons
@@ -1985,6 +1992,7 @@ def multi_picks_page():
         return render_template(
             "multi_picks.html",
             target_date=target,
+            max_tickets=max_tickets,
             coupons=coupons,
             skipped=skipped,
             recent_picks=recent_picks,

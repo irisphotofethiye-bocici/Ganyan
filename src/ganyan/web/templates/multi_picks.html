@@ -2,8 +2,17 @@
 {% block title %}6'lı / 5'lı / 7'lı GANYAN — {{ target_date }}{% endblock %}
 
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h2>Çoklu Koşu Bahisleri — {{ target_date.strftime("%d.%m.%Y") }}</h2>
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h2 class="mb-0">Çoklu Koşu Bahisleri — {{ target_date.strftime("%d.%m.%Y") }}</h2>
+    <div class="btn-group btn-group-sm" role="group" aria-label="Bütçe kapağı">
+        <span class="input-group-text bg-light small">Bütçe:</span>
+        {% for n in [256, 512, 720, 1024, 2000] %}
+        <a href="?date={{ target_date }}&max_tickets={{ n }}"
+           class="btn btn-{% if n == max_tickets %}primary{% else %}outline-primary{% endif %}">
+            {{ n }}
+        </a>
+        {% endfor %}
+    </div>
 </div>
 
 <div class="alert alert-warning small mb-4">
