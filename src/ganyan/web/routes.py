@@ -1814,3 +1814,164 @@ def advice_dashboard():
         )
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /multi-picks — 5'lı / 6'lı / 7'lı coupons across today's tracks
+# ---------------------------------------------------------------------------
+
+
+@bp.route("/multi-picks")
+def multi_picks_page():
+    """Render today's 6'lı GANYAN coupon for every track with ≥6 races.
+
+    For each track, we attempt the largest pool the program can fit
+    (7'lı if ≥7 races, otherwise 6'lı, otherwise 5'lı). Coupons are
+    generated on demand via ``generate_coupon`` — we don't persist
+    here; the CLI does that with ``--persist`` when an operator
+    actually wants to bet. Recently graded picks (last 14 days) are
+    listed below for tracking.
+    """
+    from datetime import timedelta
+
+    from ganyan.db.models import MultiRacePick, Track
+    from ganyan.predictor.multi_race_picks import generate_coupon
+
+    target_qs = request.args.get("date")
+    target = (
+        datetime.strptime(target_qs, "%Y-%m-%d").date()
+        if target_qs else date.today()
+    )
+
+    session = _get_session()
+    try:
+        tracks = (
+            session.query(Track, Race)
+            .join(Race, Race.track_id == Track.id)
+            .filter(Race.date == target)
+            .order_by(Track.name, Race.race_number)
+            .all()
+        )
+        races_per_track: dict[str, list[Race]] = {}
+        for track, race in tracks:
+            races_per_track.setdefault(track.name, []).append(race)
+
+        coupons: list[dict] = []
+        skipped: list[dict] = []
+        for track_name, race_list in races_per_track.items():
+            n = len(race_list)
+            if n < 5:
+                skipped.append({
+                    "track": track_name,
+                    "reason": f"only {n} race(s) on program (need ≥5)",
+                })
+                continue
+
+            # Pick largest pool that fits the program.
+            if n >= 7:
+                pool_type = "7li"
+                leg_count = 7
+            elif n >= 6:
+                pool_type = "6li"
+                leg_count = 6
+            else:
+                pool_type = "5li"
+                leg_count = 5
+
+            try:
+                draft = generate_coupon(
+                    session, target, track_name, 1,
+                    pool_type=pool_type, max_tickets=512,
+                )
+            except ValueError as exc:
+                skipped.append({"track": track_name, "reason": str(exc)})
+                continue
+
+            tier_labels = []
+            for w in (len(leg) for leg in draft.kept_horses_per_leg):
+                if w == 1:
+                    tier_labels.append(("LOCK", "success"))
+                elif w == 2:
+                    tier_labels.append(("medium", "primary"))
+                elif w == 3:
+                    tier_labels.append(("medium", "primary"))
+                elif w == 4:
+                    tier_labels.append(("wide", "warning"))
+                else:
+                    tier_labels.append(("spread", "secondary"))
+
+            legs = []
+            for i, (kept, conv, (label, color)) in enumerate(zip(
+                draft.kept_horses_per_leg,
+                draft.conviction_per_leg,
+                tier_labels,
+            )):
+                legs.append({
+                    "leg_no": i + 1,
+                    "race_no": i + 1,
+                    "kept": kept,
+                    "kept_str": ", ".join(str(g) for g in kept),
+                    "width": len(kept),
+                    "conviction_pct": conv * 100.0,
+                    "tier_label": label,
+                    "tier_color": color,
+                })
+
+            coupons.append({
+                "track": track_name,
+                "pool_type": pool_type,
+                "leg_count": leg_count,
+                "start_race_no": 1,
+                "end_race_no": leg_count,
+                "legs": legs,
+                "total_tickets": draft.total_tickets,
+            })
+
+        recent = (
+            session.query(MultiRacePick, Track)
+            .join(Track, Track.id == MultiRacePick.track_id)
+            .filter(
+                MultiRacePick.graded == True,  # noqa: E712
+                MultiRacePick.date >= target - timedelta(days=14),
+            )
+            .order_by(MultiRacePick.date.desc(), Track.name)
+            .all()
+        )
+        recent_picks = [
+            {
+                "date": p.date,
+                "track": t.name,
+                "pool_type": p.pool_type,
+                "pool_index": p.pool_index,
+                "stake_tl": float(p.stake_tl),
+                "hit": p.hit,
+                "payout_tl": float(p.payout_tl) if p.payout_tl is not None else 0.0,
+                "net_tl": float(p.net_tl) if p.net_tl is not None else 0.0,
+                "total_tickets": p.total_tickets,
+            }
+            for p, t in recent
+        ]
+
+        if _wants_json():
+            return jsonify({
+                "date": target.isoformat(),
+                "coupons": [
+                    {**c, "legs": [{**leg} for leg in c["legs"]]}
+                    for c in coupons
+                ],
+                "skipped": skipped,
+                "recent_picks": [
+                    {**rp, "date": rp["date"].isoformat()}
+                    for rp in recent_picks
+                ],
+            })
+
+        return render_template(
+            "multi_picks.html",
+            target_date=target,
+            coupons=coupons,
+            skipped=skipped,
+            recent_picks=recent_picks,
+        )
+    finally:
+        session.close()

@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}6'lı / 5'lı / 7'lı GANYAN — {{ target_date }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h2>Çoklu Koşu Bahisleri — {{ target_date.strftime("%d.%m.%Y") }}</h2>
+</div>
+
+<div class="alert alert-warning small mb-4">
+    <strong>Stratejinin özeti:</strong> her bacak için modelin top-1
+    olasılığına göre <em>asimetrik</em> sayıda at tutuyoruz —
+    güvendiğimiz yerde 1-2 at <span class="badge bg-success">LOCK</span>,
+    belirsizde 4-5 at <span class="badge bg-secondary">spread</span>.
+    Bütçe kapağı (varsayılan 512 kombinasyon) en geniş + en az
+    güvendiğimiz bacaktan kısarak ürünü düşürür.
+    <br>
+    <strong>Geriye dönük test henüz yok</strong> — TJK'nın çoklu havuz verisi
+    sadece 2026-05-02'den itibaren toplanıyor; anlamlı OOS sinyali için
+    ≥30 gün veri birikmesini bekliyoruz. Buradaki kuponlar
+    <em>paper-trading</em> içindir.
+</div>
+
+{% if not coupons %}
+<div class="alert alert-info">
+    {% if skipped %}
+        Bugün için uygun program bulunamadı.
+    {% else %}
+        Bugün hiç yarış yok.
+    {% endif %}
+</div>
+{% endif %}
+
+{% for coupon in coupons %}
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">
+            {{ coupon.track }} —
+            <span class="badge bg-dark">{{ coupon.pool_type|upper }} GANYAN</span>
+            <small class="text-muted ms-2">
+                R{{ coupon.start_race_no }}–R{{ coupon.end_race_no }}
+            </small>
+        </h5>
+        <div>
+            <span class="badge bg-primary fs-6">
+                {{ coupon.total_tickets }} kombinasyon
+            </span>
+        </div>
+    </div>
+    <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th class="ps-3" style="width: 4rem">Bacak</th>
+                    <th style="width: 5rem">Koşu</th>
+                    <th style="width: 7rem">Tier</th>
+                    <th class="text-end" style="width: 7rem">Top-1</th>
+                    <th class="text-end" style="width: 4rem">Genişlik</th>
+                    <th>Tutulan atlar (gate NO)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for leg in coupon.legs %}
+                <tr>
+                    <td class="ps-3 text-muted">{{ leg.leg_no }}</td>
+                    <td>R{{ leg.race_no }}</td>
+                    <td>
+                        <span class="badge bg-{{ leg.tier_color }}">
+                            {{ leg.tier_label }}
+                        </span>
+                    </td>
+                    <td class="text-end font-monospace">
+                        {{ "%.1f"|format(leg.conviction_pct) }}%
+                    </td>
+                    <td class="text-end font-monospace">{{ leg.width }}</td>
+                    <td class="font-monospace">{{ leg.kept_str }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="card-footer small text-muted">
+        Komut satırında saklamak için:
+        <code>
+        uv run ganyan multi-picks --date {{ target_date }}
+        --track {{ coupon.track }} --pool-type {{ coupon.pool_type }}
+        --persist
+        </code>
+    </div>
+</div>
+{% endfor %}
+
+{% if skipped %}
+<div class="card mb-4">
+    <div class="card-header">
+        <h6 class="mb-0">Atlanan programlar</h6>
+    </div>
+    <ul class="list-group list-group-flush small">
+        {% for s in skipped %}
+        <li class="list-group-item">
+            <strong>{{ s.track }}</strong> — {{ s.reason }}
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+{% if recent_picks %}
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">Son 14 gün — değerlendirilen kuponlar</h5>
+    </div>
+    <table class="table table-sm mb-0">
+        <thead class="table-light">
+            <tr>
+                <th class="ps-3">Tarih</th>
+                <th>Pist</th>
+                <th>Havuz</th>
+                <th class="text-end">Bilet</th>
+                <th class="text-end">Stake</th>
+                <th class="text-center">Sonuç</th>
+                <th class="text-end">Ödeme</th>
+                <th class="text-end">Net</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in recent_picks %}
+            <tr>
+                <td class="ps-3">{{ p.date.strftime("%d.%m") }}</td>
+                <td>{{ p.track }}</td>
+                <td>
+                    <span class="badge bg-secondary">
+                        {{ p.pool_type|upper }}#{{ p.pool_index }}
+                    </span>
+                </td>
+                <td class="text-end font-monospace">{{ p.total_tickets }}</td>
+                <td class="text-end font-monospace">
+                    {{ "%.2f"|format(p.stake_tl) }} ₺
+                </td>
+                <td class="text-center">
+                    {% if p.hit %}
+                    <span class="badge bg-success">İSABET</span>
+                    {% else %}
+                    <span class="badge bg-light text-muted">ıska</span>
+                    {% endif %}
+                </td>
+                <td class="text-end font-monospace">
+                    {{ "%.2f"|format(p.payout_tl) }} ₺
+                </td>
+                <td class="text-end font-monospace
+                    {% if p.net_tl > 0 %}text-success
+                    {% elif p.net_tl < 0 %}text-danger{% endif %}">
+                    {{ "%+.2f"|format(p.net_tl) }} ₺
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% endblock %}
