@@ -1856,6 +1856,12 @@ def multi_picks_page():
         for track, race in tracks:
             races_per_track.setdefault(track.name, []).append(race)
 
+        # TJK's pool window varies per program — Adana 6'lı might be R4-R9
+        # while İzmir's is R1-R6. The bahisSonucCard parser doesn't yet
+        # capture the published window (NULL on existing rows), so until
+        # that lands we render every valid window and let the user pick
+        # the one matching TJK's published pool. For a 9-race day with
+        # 7'lı, that's 3 cards (R1-R7, R2-R8, R3-R9).
         coupons: list[dict] = []
         skipped: list[dict] = []
         for track_name, race_list in races_per_track.items():
@@ -1867,65 +1873,75 @@ def multi_picks_page():
                 })
                 continue
 
-            # Pick largest pool that fits the program.
+            # Pool types this program can fit. 6'lı is the iconic Turkish
+            # multi-race pool so always show it when feasible; add 7'lı
+            # on top for ≥7-race programs. 5'lı reserved for tiny 5-race
+            # programs where neither 6'lı nor 7'lı is possible.
+            applicable = []
+            if n == 5:
+                applicable.append(("5li", 5))
+            if n >= 6:
+                applicable.append(("6li", 6))
             if n >= 7:
-                pool_type = "7li"
-                leg_count = 7
-            elif n >= 6:
-                pool_type = "6li"
-                leg_count = 6
-            else:
-                pool_type = "5li"
-                leg_count = 5
+                applicable.append(("7li", 7))
 
-            try:
-                draft = generate_coupon(
-                    session, target, track_name, 1,
-                    pool_type=pool_type, max_tickets=512,
-                )
-            except ValueError as exc:
-                skipped.append({"track": track_name, "reason": str(exc)})
-                continue
+            for pool_type, leg_count in applicable:
+                n_windows = n - leg_count + 1
+                for start_race_no in range(1, n_windows + 1):
+                    end_race_no = start_race_no + leg_count - 1
+                    try:
+                        draft = generate_coupon(
+                            session, target, track_name, start_race_no,
+                            pool_type=pool_type, max_tickets=512,
+                        )
+                    except ValueError as exc:
+                        skipped.append({
+                            "track": (
+                                f"{track_name} {pool_type} "
+                                f"R{start_race_no}-R{end_race_no}"
+                            ),
+                            "reason": str(exc),
+                        })
+                        continue
 
-            tier_labels = []
-            for w in (len(leg) for leg in draft.kept_horses_per_leg):
-                if w == 1:
-                    tier_labels.append(("LOCK", "success"))
-                elif w == 2:
-                    tier_labels.append(("medium", "primary"))
-                elif w == 3:
-                    tier_labels.append(("medium", "primary"))
-                elif w == 4:
-                    tier_labels.append(("wide", "warning"))
-                else:
-                    tier_labels.append(("spread", "secondary"))
+                    tier_labels = []
+                    for w in (len(leg) for leg in draft.kept_horses_per_leg):
+                        if w == 1:
+                            tier_labels.append(("LOCK", "success"))
+                        elif w in (2, 3):
+                            tier_labels.append(("medium", "primary"))
+                        elif w == 4:
+                            tier_labels.append(("wide", "warning"))
+                        else:
+                            tier_labels.append(("spread", "secondary"))
 
-            legs = []
-            for i, (kept, conv, (label, color)) in enumerate(zip(
-                draft.kept_horses_per_leg,
-                draft.conviction_per_leg,
-                tier_labels,
-            )):
-                legs.append({
-                    "leg_no": i + 1,
-                    "race_no": i + 1,
-                    "kept": kept,
-                    "kept_str": ", ".join(str(g) for g in kept),
-                    "width": len(kept),
-                    "conviction_pct": conv * 100.0,
-                    "tier_label": label,
-                    "tier_color": color,
-                })
+                    legs = []
+                    for i, (kept, conv, (label, color)) in enumerate(zip(
+                        draft.kept_horses_per_leg,
+                        draft.conviction_per_leg,
+                        tier_labels,
+                    )):
+                        legs.append({
+                            "leg_no": i + 1,
+                            "race_no": start_race_no + i,
+                            "kept": kept,
+                            "kept_str": ", ".join(str(g) for g in kept),
+                            "width": len(kept),
+                            "conviction_pct": conv * 100.0,
+                            "tier_label": label,
+                            "tier_color": color,
+                        })
 
-            coupons.append({
-                "track": track_name,
-                "pool_type": pool_type,
-                "leg_count": leg_count,
-                "start_race_no": 1,
-                "end_race_no": leg_count,
-                "legs": legs,
-                "total_tickets": draft.total_tickets,
-            })
+                    coupons.append({
+                        "track": track_name,
+                        "pool_type": pool_type,
+                        "leg_count": leg_count,
+                        "start_race_no": start_race_no,
+                        "end_race_no": end_race_no,
+                        "n_windows": n_windows,
+                        "legs": legs,
+                        "total_tickets": draft.total_tickets,
+                    })
 
         recent = (
             session.query(MultiRacePick, Track)

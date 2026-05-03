@@ -20,6 +20,16 @@
     <em>paper-trading</em> içindir.
 </div>
 
+<div class="alert alert-info small mb-4">
+    <strong>Koşu penceresi seçimi:</strong> TJK her programda 6'lı/5'lı/7'lı
+    havuzunu <em>belirli</em> bir koşu aralığında oynatır
+    (ör. Adana 6'lı genelde R4-R9). Sistem henüz TJK'nın yayınladığı
+    pencereyi otomatik okuyamadığı için, bir programa uygun <em>tüm</em>
+    pencereleri ayrı ayrı kart olarak gösteriyoruz —
+    TJK'nın bahis kuponunda hangi koşu aralığı yazıyorsa, ona uyan
+    kartı seç.
+</div>
+
 {% if not coupons %}
 <div class="alert alert-info">
     {% if skipped %}
@@ -36,9 +46,14 @@
         <h5 class="mb-0">
             {{ coupon.track }} —
             <span class="badge bg-dark">{{ coupon.pool_type|upper }} GANYAN</span>
-            <small class="text-muted ms-2">
+            <span class="badge bg-info text-dark ms-2 fs-6">
                 R{{ coupon.start_race_no }}–R{{ coupon.end_race_no }}
+            </span>
+            {% if coupon.n_windows and coupon.n_windows > 1 %}
+            <small class="text-muted ms-2">
+                ({{ coupon.n_windows }} olası pencereden biri)
             </small>
+            {% endif %}
         </h5>
         <div>
             <span class="badge bg-primary fs-6">
@@ -83,7 +98,7 @@
         <code>
         uv run ganyan multi-picks --date {{ target_date }}
         --track {{ coupon.track }} --pool-type {{ coupon.pool_type }}
-        --persist
+        --start-race {{ coupon.start_race_no }} --persist
         </code>
     </div>
 </div>
