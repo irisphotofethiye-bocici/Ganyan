@@ -38,8 +38,8 @@ from sqlalchemy.orm import Session
 
 from ganyan.db.models import Pick, Race, RaceEntry, RaceStatus
 from ganyan.predictor.exotics import (
-    ganyan_probabilities, sirali_ikili_probabilities,
-    uclu_probabilities,
+    ganyan_probabilities, plase_probabilities,
+    sirali_ikili_probabilities, uclu_probabilities,
 )
 
 
@@ -54,7 +54,10 @@ STAKE_PER_TICKET_TL = 100.0
 # in cli/main.py:2031 and web/routes.py:1279 chooses a subset to surface
 # in /advice.  Keep this tuple unchanged when retiring a strategy from
 # advice — the ledger must stay continuous for ROI tracking.
-STRATEGIES = ("ganyan_top1", "uclu_top1", "uclu_box6", "sirali_ikili_top1")
+STRATEGIES = (
+    "ganyan_top1", "uclu_top1", "uclu_box6",
+    "sirali_ikili_top1", "plase_top1",
+)
 
 
 # Per-pool minimum bilet stake ("birim fiyat") in TL.
@@ -75,6 +78,7 @@ BIRIM_TL_BY_STRATEGY = {
     "sirali_ikili_top1": 1.0,  # tentative — to verify with a real bilet
     "uclu_top1": 2.0,           # verified
     "uclu_box6": 2.0,           # verified
+    "plase_top1": 1.0,          # min stake; payout pool not scraped (2026-05-06)
 }
 
 
@@ -204,6 +208,26 @@ def generate_picks_for_race(
             model_prob_pct=top.probability * 100.0,
         ))
 
+    # plase_top1 — top-2 finish coverage on the most-likely-top-2 horse.
+    # Mirrors bet_recommendations.compute_bet_recommendations Plase line
+    # (top_k=2). Tracks the CLAUDE.md invariant 5 ("Tek+Plase is the
+    # default at high conviction"). Payout column not scraped yet, so
+    # graded picks carry hit but NULL payout/net — observability for hit
+    # rate now, ROI gated on a future plase_payout_tl scraper change.
+    if "plase_top1" not in existing and len(win_probs) >= 2:
+        plase = plase_probabilities(win_probs, top_k=2)
+        if plase:
+            top = plase[0]
+            added.append(_make_pick(
+                race_id=race_id,
+                strategy="plase_top1",
+                combination=list(top.horses),
+                combination_names=[name_for.get(h, "?") for h in top.horses],
+                stake=STAKE_PER_TICKET_TL,
+                tickets=1,
+                model_prob_pct=top.probability * 100.0,
+            ))
+
     for p in added:
         session.add(p)
     session.flush()
@@ -283,6 +307,10 @@ def _strategy_hit(strategy: str, combination: list[int], actual: tuple[int, ...]
         if len(actual) < 2:
             return None
         return tuple(combination) == actual[:2]
+    if strategy == "plase_top1":
+        if len(actual) < 2:
+            return None
+        return combination[0] in actual[:2]
     return None
 
 
@@ -318,6 +346,48 @@ def grade_race(session: Session, race_id: int) -> int:
         if hit is None:
             continue
 
+        # plase_top1 — Plase pool publishes per-horse payouts as
+        # ``PLASE <program_no> <amount>``.  We persist that on the
+        # picked horse's race_entry; on hit, the bilet's settled value
+        # is `entry.plase_payout_tl × stake_per_ticket`.  When the
+        # scrape ran before the plase_payout_tl column existed (any
+        # race scraped before 2026-05-06) the entry value will be NULL
+        # — keep payout/net NULL so the row carries hit-rate signal
+        # only and a future re-scrape can fill the ROI side.
+        if pick.strategy == "plase_top1":
+            pick.hit = hit
+            pick.graded = True
+            pick.graded_at = now
+            picked_horse_id = pick.combination[0] if pick.combination else None
+            picked_entry = next(
+                (e for e in entries if e.horse_id == picked_horse_id), None,
+            )
+            plase_value = (
+                float(picked_entry.plase_payout_tl)
+                if picked_entry is not None
+                and picked_entry.plase_payout_tl is not None
+                else None
+            )
+            if hit and plase_value is not None:
+                winning_ticket_payout = (
+                    plase_value * STAKE_PER_TICKET_TL / _birim_tl(pick.strategy)
+                )
+                pick.payout_tl = round(winning_ticket_payout, 2)
+                pick.net_tl = round(winning_ticket_payout - float(pick.stake_tl), 2)
+            elif not hit and plase_value is not None:
+                # We have payout-pool confirmation that the bet failed
+                # → record the loss in TL (mirrors other strategies'
+                # miss path).
+                pick.payout_tl = 0.0
+                pick.net_tl = -float(pick.stake_tl)
+            else:
+                # Pool data missing — hit is recorded for hit-rate
+                # tracking, ROI deferred until re-scrape lands.
+                pick.payout_tl = None
+                pick.net_tl = None
+            graded += 1
+            continue
+
         payout_per_tl = _strategy_payout_tl(pick.strategy, race)
         # Skip grading when TJK didn't publish a payout for this pool:
         # the bet literally could not have been placed, so it doesn't
@@ -349,6 +419,56 @@ def grade_race(session: Session, race_id: int) -> int:
     if graded:
         session.flush()
     return graded
+
+
+def resettle_plase_picks(session: Session) -> int:
+    """Fill payout/net on already-graded plase_top1 picks whose horse's
+    plase_payout_tl has since been populated.
+
+    Use after a re-scrape adds ``race_entries.plase_payout_tl`` to races
+    we'd previously graded with NULL payout (every race scraped before
+    2026-05-06 falls in this bucket until re-fetched).  Idempotent.
+    Returns the number of picks whose payout/net were updated.
+    """
+    rows = (
+        session.query(Pick)
+        .filter(
+            Pick.strategy == "plase_top1",
+            Pick.graded.is_(True),
+            Pick.payout_tl.is_(None),
+        )
+        .all()
+    )
+    updated = 0
+    for pick in rows:
+        if not pick.combination:
+            continue
+        picked_horse_id = pick.combination[0]
+        entry = (
+            session.query(RaceEntry)
+            .filter(
+                RaceEntry.race_id == pick.race_id,
+                RaceEntry.horse_id == picked_horse_id,
+            )
+            .first()
+        )
+        if entry is None or entry.plase_payout_tl is None:
+            continue
+        if pick.hit:
+            winning_ticket_payout = (
+                float(entry.plase_payout_tl)
+                * STAKE_PER_TICKET_TL
+                / _birim_tl(pick.strategy)
+            )
+            pick.payout_tl = round(winning_ticket_payout, 2)
+            pick.net_tl = round(winning_ticket_payout - float(pick.stake_tl), 2)
+        else:
+            pick.payout_tl = 0.0
+            pick.net_tl = -float(pick.stake_tl)
+        updated += 1
+    if updated:
+        session.flush()
+    return updated
 
 
 def grade_all_pending(session: Session) -> int:
@@ -389,18 +509,29 @@ def strategy_summary(
     agg: dict[str, dict] = {}
     for p in q.all():
         row = agg.setdefault(p.strategy, {
-            "n": 0, "hits": 0, "stake_tl": 0.0, "payout_tl": 0.0, "net_tl": 0.0,
+            "n": 0, "hits": 0, "priced_n": 0,
+            "stake_tl": 0.0, "priced_stake_tl": 0.0,
+            "payout_tl": 0.0, "net_tl": 0.0,
         })
         row["n"] += 1
         row["stake_tl"] += float(p.stake_tl)
         if p.hit:
             row["hits"] += 1
         if p.payout_tl is not None:
+            row["priced_n"] += 1
+            row["priced_stake_tl"] += float(p.stake_tl)
             row["payout_tl"] += float(p.payout_tl)
         if p.net_tl is not None:
             row["net_tl"] += float(p.net_tl)
 
     for row in agg.values():
         row["hit_rate_pct"] = (row["hits"] / row["n"]) * 100 if row["n"] else 0
-        row["roi_pct"] = (row["net_tl"] / row["stake_tl"]) * 100 if row["stake_tl"] else 0
+        # ROI is computed over PRICED stake only — picks without payout
+        # data don't belong in the denominator (they'd silently inflate
+        # losses). For strategies where every pick is priced (sirali_ikili,
+        # uclu, ganyan), priced_stake_tl == stake_tl and the math matches
+        # the legacy formula. Callers needing the full-stake denominator
+        # can divide net_tl by stake_tl themselves.
+        denom = row["priced_stake_tl"] or row["stake_tl"]
+        row["roi_pct"] = (row["net_tl"] / denom) * 100 if denom else 0
     return agg

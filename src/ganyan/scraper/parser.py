@@ -26,6 +26,11 @@ class RawHorseEntry:
     last_six: str | None = None
     finish_position: int | None = None
     finish_time: str | None = None
+    # Plase pool payout (TL per 1 TL bilet) for this horse, when it
+    # placed.  TJK publishes one row per placed horse:
+    # ``PLASE <program_no> <amount>``.  None for non-placed horses or
+    # races where the plase pool didn't form (rare on small fields).
+    plase_payout_tl: float | None = None
     # TJK's stable internal id for this horse.  Extracted from the
     # horse-name <a href> on the results/program pages so we can hit
     # /Query/ConnectedPage/AtKosuBilgileri?QueryParameter_AtId=X for
@@ -101,6 +106,7 @@ class ParsedHorseEntry:
     last_six_parsed: list[int | None] = field(default_factory=list)
     finish_position: int | None = None
     finish_time: str | None = None
+    plase_payout_tl: float | None = None
     tjk_at_id: int | None = None
     equipment: str | None = None
     scratched: bool = False
@@ -276,6 +282,7 @@ def parse_race_card(raw: RawRaceCard) -> ParsedRaceCard:
             last_six_parsed=parse_last_six(h.last_six),
             finish_position=h.finish_position,
             finish_time=h.finish_time,
+            plase_payout_tl=h.plase_payout_tl,
             tjk_at_id=h.tjk_at_id,
             equipment=h.equipment,
             scratched=getattr(h, "scratched", False),

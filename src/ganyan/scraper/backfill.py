@@ -118,6 +118,7 @@ def get_or_create_horse(session: Session, name: str, **kwargs) -> Horse:
 _ENTRY_REFRESH_FIELDS = (
     "gate_number", "jockey", "weight_kg", "hp", "kgs",
     "s20", "eid", "gny", "agf", "last_six", "equipment",
+    "plase_payout_tl",
 )
 
 
@@ -268,6 +269,7 @@ def store_race_card(session: Session, parsed: ParsedRaceCard) -> Race:
             equipment=h.equipment,
             finish_position=h.finish_position,
             finish_time=h.finish_time,
+            plase_payout_tl=getattr(h, "plase_payout_tl", None),
             scratched=getattr(h, "scratched", False),
         )
         session.add(entry)
@@ -427,6 +429,7 @@ def store_historical_race(session: Session, parsed: ParsedRaceCard) -> Race:
             equipment=h.equipment,
             finish_position=h.finish_position,
             finish_time=h.finish_time,
+            plase_payout_tl=getattr(h, "plase_payout_tl", None),
         )
         session.add(entry)
         session.flush()
@@ -496,6 +499,14 @@ def update_race_results(session: Session, parsed: ParsedRaceCard) -> Race | None
             entry.finish_position = h.finish_position
         if h.finish_time is not None:
             entry.finish_time = h.finish_time
+        # Plase pool settles late on the same results card; write-once
+        # like the race-level payouts so a TJK pool amendment doesn't
+        # silently move a graded pick's settled payout.
+        if (
+            getattr(h, "plase_payout_tl", None) is not None
+            and entry.plase_payout_tl is None
+        ):
+            entry.plase_payout_tl = h.plase_payout_tl
 
     race.status = RaceStatus.resulted
     session.flush()

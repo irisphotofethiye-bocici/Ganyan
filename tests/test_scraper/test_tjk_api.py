@@ -692,3 +692,47 @@ class TestHelpers:
         html = "<td></td>"
         soup = BeautifulSoup(html, "html.parser")
         assert _extract_eid(soup.select_one("td")) is None
+
+
+# ---------------------------------------------------------------------------
+# Plase payout parsing
+# ---------------------------------------------------------------------------
+
+
+class TestParsePlasePayouts:
+    """Cover the `PLASE <program_no> <amount>` extraction.
+
+    Real TJK bahisSonucCard fixture (İstanbul R2, 2026-05-05):
+        GANYAN 2 2,55 ₺ İKİLİ 1/2 2,25 ₺ SIRALI İKİLİ 2/1 4,30 ₺
+        1. ÇİFTE 1/2 16,10 ₺ PLASE 1 1,60 ₺ PLASE 2 1,30 ₺
+        ÜÇLÜ BAHİS 2/1/9 16,30 ₺
+    """
+
+    def test_typical_two_horse_plase(self):
+        from ganyan.scraper.tjk_api import _parse_plase_payouts
+        block = (
+            "GANYAN 2 2,55 ₺ İKİLİ 1/2 2,25 ₺ SIRALI İKİLİ 2/1 4,30 ₺ "
+            "1. ÇİFTE 1/2 16,10 ₺ PLASE 1 1,60 ₺ PLASE 2 1,30 ₺ "
+            "ÜÇLÜ BAHİS 2/1/9 16,30 ₺"
+        )
+        assert _parse_plase_payouts(block) == {1: 1.60, 2: 1.30}
+
+    def test_three_horse_plase_large_field(self):
+        from ganyan.scraper.tjk_api import _parse_plase_payouts
+        block = "PLASE 5 2,40 ₺ PLASE 11 4,10 ₺ PLASE 7 6,80 ₺"
+        assert _parse_plase_payouts(block) == {5: 2.40, 11: 4.10, 7: 6.80}
+
+    def test_no_plase_in_block(self):
+        from ganyan.scraper.tjk_api import _parse_plase_payouts
+        block = "GANYAN 1 3,70 ₺ İKİLİ 1/4 4,25 ₺ SIRALI İKİLİ 1/4 12,15 ₺"
+        assert _parse_plase_payouts(block) == {}
+
+    def test_empty_block(self):
+        from ganyan.scraper.tjk_api import _parse_plase_payouts
+        assert _parse_plase_payouts("") == {}
+
+    def test_amount_with_thousands_separator(self):
+        from ganyan.scraper.tjk_api import _parse_plase_payouts
+        # rare but possible — long-shot plase pays e.g. 1.234,50
+        block = "PLASE 3 1.234,50 ₺"
+        assert _parse_plase_payouts(block) == {3: 1234.50}

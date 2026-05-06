@@ -327,9 +327,18 @@ def _job_results_poll(settings: Settings) -> None:
     # nothing new finished since the last poll.
     session = get_session()
     try:
-        from ganyan.predictor.picks import grade_all_pending
+        from ganyan.predictor.picks import grade_all_pending, resettle_plase_picks
 
         graded = grade_all_pending(session)
+        # plase_top1 picks are graded the moment the finish positions
+        # land, but their payout column may still be NULL until TJK
+        # publishes "PLASE <program_no> <amount>" on the bahisSonucCard.
+        # resettle_plase_picks fills in payout/net once the scraper
+        # picks up that row on a later poll. Cheap when nothing's
+        # missing.
+        resettled = resettle_plase_picks(session)
+        if resettled:
+            logger.info("scheduler: resettled %d plase_top1 picks", resettled)
         session.commit()
     except Exception:  # noqa: BLE001
         logger.exception("scheduler: pick grading failed")

@@ -1225,8 +1225,8 @@ def picks_dashboard():
         # Sort picks so rows for the same race cluster and strategies
         # within a race come out in a stable order.
         _strategy_order = {
-            "ganyan_top1": 0, "sirali_ikili_top1": 1,
-            "uclu_top1": 2, "uclu_box6": 3,
+            "ganyan_top1": 0, "plase_top1": 1, "sirali_ikili_top1": 2,
+            "uclu_top1": 3, "uclu_box6": 4,
         }
         recent_picks.sort(
             key=lambda p: (
@@ -1303,16 +1303,18 @@ def advice_dashboard():
     from sqlalchemy.orm import joinedload
 
     # uclu_top1 dropped 2026-05-02: 0 hits on n=16 gated picks, ROI −100%.
-    # uclu_box6 kept (only form near takeout floor on gated races).
-    # sirali_ikili_top1 kept for visibility despite poor gated ROI.
-    BETTING_STRATEGIES = ("uclu_box6", "sirali_ikili_top1")
+    # uclu_box6 dropped 2026-05-05: rolling 30d ROI −32.5% on n=895 with 7d
+    # slope at −44.4%; structurally fragile (Üçlü-K3 set match ~15%).
+    BETTING_STRATEGIES = ("sirali_ikili_top1",)
     STRATEGY_ORDER = {s: i for i, s in enumerate(BETTING_STRATEGIES)}
 
     date_str = request.args.get("date")
     bankroll = float(request.args.get("bankroll", 10000))
     kelly_mult = float(request.args.get("kelly", 0.25))
-    # Default ON. ?cohort_filter=0 to disable.
-    cohort_filter = request.args.get("cohort_filter", "1") not in ("0", "false", "")
+    # Default OFF since 2026-05-05: filter helps uclu_box6 (+14.8pp) but
+    # hurts sirali_ikili_top1 (−10.4pp); uclu_box6 retired, only the hurt
+    # remains. ?cohort_filter=1 to re-enable.
+    cohort_filter = request.args.get("cohort_filter", "0") not in ("0", "false", "")
     # Bayes skip-gate (mirrors `ganyan advice` CLI). Default ON.
     bayes_skip = request.args.get("bayes_skip", "1") not in ("0", "false", "")
     bayes_min_prob = float(request.args.get("bayes_min_prob", 0.35))

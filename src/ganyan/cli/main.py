@@ -2047,7 +2047,7 @@ def picks_cmd(
     # is now a live betting strategy.
     # uclu_top1 dropped 2026-05-02: 0 hits on n=16 gated picks, ROI −100%.
     BETTING = {"uclu_box6", "sirali_ikili_top1"}
-    REFERENCE = {"ganyan_top1", "uclu_top1"}
+    REFERENCE = {"ganyan_top1", "uclu_top1", "plase_top1"}
 
     header = (
         f"{'Strateji (TJK)':<28} {'N':>5} {'Hits':>5} {'Hit%':>6} "
@@ -2056,13 +2056,30 @@ def picks_cmd(
 
     def _fmt(strat_key: str, row: dict) -> str:
         label = strategy_display(strat_key, short=True) if strat_key in (
-            "uclu_top1", "uclu_box6", "sirali_ikili_top1", "ganyan_top1"
+            "uclu_top1", "uclu_box6", "sirali_ikili_top1",
+            "ganyan_top1", "plase_top1",
         ) else strat_key
+        priced = row.get("priced_n", row["n"])
+        n = row["n"]
+        if priced == 0:
+            # No payout data at all — hit rate is the only meaningful metric.
+            payout_s = f"{'—':>12}"
+            net_s = f"{'—':>11}"
+            roi_s = f"{'—':>8}"
+        else:
+            payout_s = f"{row['payout_tl']:>12,.0f}"
+            net_s = f"{row['net_tl']:>11,.0f}"
+            roi_s = f"{row['roi_pct']:>+7.1f}%"
+        # Annotate the label when payout data is partial so the ROI
+        # number's denominator is unambiguous (otherwise it looks like
+        # ROI on the full N).
+        if 0 < priced < n:
+            label = f"{label} ({priced}/{n} priced)"
         return (
             f"{label:<28} {row['n']:>5} {row['hits']:>5} "
             f"{row['hit_rate_pct']:>5.1f}% "
-            f"{row['stake_tl']:>11,.0f} {row['payout_tl']:>12,.0f} "
-            f"{row['net_tl']:>11,.0f} {row['roi_pct']:>+7.1f}%"
+            f"{row['stake_tl']:>11,.0f} {payout_s} "
+            f"{net_s} {roi_s}"
         )
 
     betting_keys = sorted(k for k in summary if k in BETTING)
@@ -2226,9 +2243,11 @@ def advice_cmd(
         help="Kelly multiplier (0.25 = quarter-Kelly, the standard).",
     ),
     cohort_filter: bool = typer.Option(
-        True, "--cohort-filter/--no-cohort-filter",
+        False, "--cohort-filter/--no-cohort-filter",
         help="Skip races in known-loss cohorts: Maiden /Dişi (-46%% ROI), "
-             "field≥13 (-22%%), Şanlıurfa/Bursa (-27%%/-34%%). Default ON.",
+             "field≥13 (-22%%), Şanlıurfa/Bursa (-27%%/-34%%). "
+             "Default OFF since 2026-05-05 (uclu_box6 retired; filter hurts "
+             "sirali_ikili_top1 -10.4pp).",
     ),
     bayes_skip: bool = typer.Option(
         True, "--bayes-skip/--no-bayes-skip",
@@ -2302,7 +2321,8 @@ def advice_cmd(
         _dt.strptime(date_str, "%Y-%m-%d").date() if date_str else _date.today()
     )
     # uclu_top1 dropped 2026-05-02: 0/16 hits on gated picks, ROI −100%.
-    BETTING_STRATEGIES = ("uclu_box6", "sirali_ikili_top1")
+    # uclu_box6 dropped 2026-05-05: 30d ROI −32.5% on n=895; 7d slope −44.4%.
+    BETTING_STRATEGIES = ("sirali_ikili_top1",)
 
     bayes_idata = bayes_frame = None
     bayes_speed_history = None

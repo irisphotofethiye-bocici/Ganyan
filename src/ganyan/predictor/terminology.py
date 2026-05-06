@@ -18,6 +18,7 @@ STRATEGY_DISPLAY_TR: dict[str, str] = {
     "uclu_box6": "Sıralı Üçlü Bahis (Kutu 6)",
     "sirali_ikili_top1": "Sıralı İkili Bahis (tek kombinasyon)",
     "ganyan_top1": "Ganyan (referans)",
+    "plase_top1": "Plase (banko, top-2)",
 }
 
 STRATEGY_DISPLAY_SHORT_TR: dict[str, str] = {
@@ -25,6 +26,7 @@ STRATEGY_DISPLAY_SHORT_TR: dict[str, str] = {
     "uclu_box6": "Üçlü Kutu 6",
     "sirali_ikili_top1": "İkili Sıralı Tek",
     "ganyan_top1": "Ganyan",
+    "plase_top1": "Plase",
 }
 
 STRATEGY_BET_SLIP_STEPS_TR: dict[str, list[str]] = {
@@ -82,6 +84,7 @@ MINIMUM_STAKES_TL: dict[str, float] = {
     "sirali_ikili_top1": 2.0,
     "ganyan_top1": 1.0,
     "plase": 1.0,
+    "plase_top1": 1.0,
 }
 
 

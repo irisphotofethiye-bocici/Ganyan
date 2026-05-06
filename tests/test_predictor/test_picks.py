@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import pytest
 
-from ganyan.predictor.picks import BIRIM_TL_BY_STRATEGY, _birim_tl
+from ganyan.predictor.picks import (
+    BIRIM_TL_BY_STRATEGY, STRATEGIES, _birim_tl, _strategy_hit,
+)
 
 
 def test_birim_table_covers_all_strategies():
-    for strat in ("ganyan_top1", "uclu_top1", "uclu_box6", "sirali_ikili_top1"):
+    for strat in (
+        "ganyan_top1", "uclu_top1", "uclu_box6",
+        "sirali_ikili_top1", "plase_top1",
+    ):
         assert strat in BIRIM_TL_BY_STRATEGY
+
+
+def test_plase_top1_in_strategies_tuple():
+    assert "plase_top1" in STRATEGIES
 
 
 def test_uclu_birim_is_two_tl():
@@ -17,13 +26,37 @@ def test_uclu_birim_is_two_tl():
     assert _birim_tl("uclu_box6") == 2.0
 
 
-def test_ganyan_and_sirali_ikili_birim_is_one_tl():
+def test_ganyan_sirali_ikili_plase_birim_is_one_tl():
     assert _birim_tl("ganyan_top1") == 1.0
     assert _birim_tl("sirali_ikili_top1") == 1.0
+    assert _birim_tl("plase_top1") == 1.0
 
 
 def test_unknown_strategy_defaults_to_one_tl():
     assert _birim_tl("not_a_strategy") == 1.0
+
+
+# Plase grading: model #1 hits when it finishes 1st OR 2nd.
+# Mirrors the verified 2026-05-06 İstanbul R1-R5 pattern where the
+# model's #1 pick finished 2nd in all 5 — Tek miss, Plase hit.
+def test_plase_top1_hit_when_model_finishes_first():
+    # actual = (1st, 2nd, 3rd) = (42, 7, 99); pick combination[0] = 42
+    assert _strategy_hit("plase_top1", [42], (42, 7, 99)) is True
+
+
+def test_plase_top1_hit_when_model_finishes_second():
+    assert _strategy_hit("plase_top1", [42], (7, 42, 99)) is True
+
+
+def test_plase_top1_miss_when_model_finishes_third_or_lower():
+    assert _strategy_hit("plase_top1", [42], (7, 99, 42)) is False
+    assert _strategy_hit("plase_top1", [42], (7, 99, 12)) is False
+
+
+def test_plase_top1_returns_none_when_only_one_finisher():
+    # _actual_top3 only returns when len(ordered) >= 2; this checks the
+    # secondary guard inside _strategy_hit for short-actual inputs.
+    assert _strategy_hit("plase_top1", [42], (42,)) is None
 
 
 # Regression fixture — derived from operator's real bilet 68671854006416,

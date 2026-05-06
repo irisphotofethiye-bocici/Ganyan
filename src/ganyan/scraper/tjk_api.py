@@ -430,6 +430,32 @@ def _parse_payout_amount(text: str) -> float | None:
         return None
 
 
+_PLASE_PATTERN = r"(?<![\w'İ])PLASE\s+(\d+)\s+([\d.,]+)"
+
+
+def _parse_plase_payouts(block_text: str) -> dict[int, float]:
+    """Extract per-horse plase payouts from a bahisSonucCard block.
+
+    TJK publishes plase as one row per placed horse:
+    ``PLASE <program_no> <amount>``.  Returns a ``{program_no: tl}``
+    dict; horses outside the placed cohort have no entry.  An empty
+    dict means the plase pool didn't form (typical for very small
+    fields where plase isn't paid).
+    """
+    out: dict[int, float] = {}
+    if not block_text:
+        return out
+    for m in re.finditer(_PLASE_PATTERN, block_text):
+        try:
+            program_no = int(m.group(1))
+        except ValueError:
+            continue
+        amount = _parse_payout_amount(m.group(2))
+        if amount is not None:
+            out[program_no] = amount
+    return out
+
+
 def _parse_exotic_payouts(block_text: str) -> dict[str, float | None]:
     """Extract all exotic-pool payouts from a race's ``bahisSonucAltCard`` text.
 
@@ -1135,9 +1161,11 @@ class TJKClient:
                 "ganyan": None, "ikili": None, "sirali_ikili": None,
                 "uclu": None, "dortlu": None,
             }
+            plase_map: dict[int, float] = {}
             multi_pools: list[dict] = []
             if idx < len(payout_blocks):
                 payouts = _parse_exotic_payouts(payout_blocks[idx])
+                plase_map = _parse_plase_payouts(payout_blocks[idx])
                 multi_pools = _parse_multi_race_pools(payout_blocks[idx])
 
             # --- Horse rows ---
@@ -1148,6 +1176,8 @@ class TJKClient:
             for row in rows:
                 horse = self._parse_horse_row(row, is_results)
                 if horse and horse.name:
+                    if horse.gate_number is not None:
+                        horse.plase_payout_tl = plase_map.get(horse.gate_number)
                     horses.append(horse)
 
             card = RawRaceCard(

@@ -156,6 +156,10 @@ class RaceEntry(Base):
     finish_time: Mapped[str | None] = mapped_column(String(20))
     performance_score: Mapped[float | None] = mapped_column(Numeric(5, 2))
     predicted_probability: Mapped[float | None] = mapped_column(Numeric(5, 2))
+    # Plase pool settled payout (TL per 1 TL bilet) for this entry —
+    # populated by the scraper from "PLASE <program_no> <amount>" rows.
+    # NULL when the horse didn't place or the pool didn't form.
+    plase_payout_tl: Mapped[float | None] = mapped_column(Numeric(8, 2))
     # Pre-race scratch flag — set by the scraper when the TJK program
     # marks the horse as "(Koşmaz)". Predictor + bet recommendations
     # exclude scratched entries and renormalise win probabilities.
