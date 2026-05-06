@@ -30,6 +30,9 @@ class HorseFeatures:
     agf_edge: float | None = None  # market (AGF) deviation from uniform
     sire_win_rate: float | None = None  # sire's offspring overall win rate
     sire_surface_rate: float | None = None  # sire's offspring rate on this surface
+    dam_win_rate: float | None = None  # dam's offspring overall win rate
+    dam_surface_rate: float | None = None  # dam's offspring rate on this surface
+    jockey_track_win_rate: float | None = None  # jockey's win rate at this track
     # Domain-derived signals that Turkish handicappers ("sürpriz at")
     # look for — decorrelated from AGF because the public often ignores
     # them.  All are 0/1 indicators except distance_delta_m.
@@ -260,6 +263,121 @@ def compute_sire_surface_rate(
         .filter(
             Horse.sire == sire,
             Race.surface == surface,
+            Race.status == RaceStatus.resulted,
+            RaceEntry.finish_position.isnot(None),
+        )
+    )
+    if before_date is not None:
+        base = base.filter(Race.date < before_date)
+
+    runs = base.with_entities(func.count(RaceEntry.id)).scalar() or 0
+    if runs == 0:
+        return None
+    wins = (
+        base.filter(RaceEntry.finish_position == 1)
+        .with_entities(func.count(RaceEntry.id))
+        .scalar()
+    ) or 0
+    return _bayesian_smoothed_rate(wins, runs)
+
+
+def compute_dam_win_rate(
+    session: Session,
+    dam: str | None,
+    before_date: date_type | None = None,
+) -> float | None:
+    """Smoothed win rate for all offspring of ``dam``. Mirrors compute_sire_win_rate.
+
+    Maternal genetic contribution is independent from paternal (sire) — about
+    half of the heritable variance comes from each parent. Carrying both as
+    features lets the tree weigh them separately.
+    """
+    if not dam:
+        return None
+    from ganyan.db.models import Horse
+
+    base = (
+        session.query(RaceEntry)
+        .join(Horse, Horse.id == RaceEntry.horse_id)
+        .join(Race, Race.id == RaceEntry.race_id)
+        .filter(
+            Horse.dam == dam,
+            Race.status == RaceStatus.resulted,
+            RaceEntry.finish_position.isnot(None),
+        )
+    )
+    if before_date is not None:
+        base = base.filter(Race.date < before_date)
+
+    runs = base.with_entities(func.count(RaceEntry.id)).scalar() or 0
+    if runs == 0:
+        return None
+    wins = (
+        base.filter(RaceEntry.finish_position == 1)
+        .with_entities(func.count(RaceEntry.id))
+        .scalar()
+    ) or 0
+    return _bayesian_smoothed_rate(wins, runs)
+
+
+def compute_dam_surface_rate(
+    session: Session,
+    dam: str | None,
+    surface: str | None,
+    before_date: date_type | None = None,
+) -> float | None:
+    """Win rate for ``dam``'s offspring on the given surface."""
+    if not dam or not surface:
+        return None
+    from ganyan.db.models import Horse
+
+    base = (
+        session.query(RaceEntry)
+        .join(Horse, Horse.id == RaceEntry.horse_id)
+        .join(Race, Race.id == RaceEntry.race_id)
+        .filter(
+            Horse.dam == dam,
+            Race.surface == surface,
+            Race.status == RaceStatus.resulted,
+            RaceEntry.finish_position.isnot(None),
+        )
+    )
+    if before_date is not None:
+        base = base.filter(Race.date < before_date)
+
+    runs = base.with_entities(func.count(RaceEntry.id)).scalar() or 0
+    if runs == 0:
+        return None
+    wins = (
+        base.filter(RaceEntry.finish_position == 1)
+        .with_entities(func.count(RaceEntry.id))
+        .scalar()
+    ) or 0
+    return _bayesian_smoothed_rate(wins, runs)
+
+
+def compute_jockey_track_win_rate(
+    session: Session,
+    jockey: str | None,
+    track_id: int | None,
+    before_date: date_type | None = None,
+) -> float | None:
+    """Smoothed win rate for ``jockey`` at the given ``track_id``.
+
+    Track-specific jockey form: some riders consistently outperform their
+    overall rate at familiar tracks (course shape, surface, gate draws).
+    Bayesian-smoothed against the population mean so cold starts don't
+    swing wildly.
+    """
+    if not jockey or track_id is None:
+        return None
+
+    base = (
+        session.query(RaceEntry)
+        .join(Race, Race.id == RaceEntry.race_id)
+        .filter(
+            RaceEntry.jockey == jockey,
+            Race.track_id == track_id,
             Race.status == RaceStatus.resulted,
             RaceEntry.finish_position.isnot(None),
         )
@@ -1096,6 +1214,8 @@ def extract_features(
     agf: float | None = None,
     field_size: int | None = None,
     sire: str | None = None,
+    dam: str | None = None,
+    track_id: int | None = None,
     equipment: str | None = None,
     field_pace_density: float | None = None,
     agf_reliability: float | None = None,
@@ -1149,6 +1269,15 @@ def extract_features(
         )
         features.sire_surface_rate = compute_sire_surface_rate(
             session, sire, surface, before_date=race_date,
+        )
+        features.dam_win_rate = compute_dam_win_rate(
+            session, dam, before_date=race_date,
+        )
+        features.dam_surface_rate = compute_dam_surface_rate(
+            session, dam, surface, before_date=race_date,
+        )
+        features.jockey_track_win_rate = compute_jockey_track_win_rate(
+            session, jockey, track_id, before_date=race_date,
         )
         if horse_id is not None:
             features.surface_affinity = compute_surface_affinity(

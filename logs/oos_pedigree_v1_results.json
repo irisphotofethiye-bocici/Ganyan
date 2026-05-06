@@ -1,0 +1,17 @@
+{
+  "window": [
+    "2025-01-01",
+    "2026-02-04"
+  ],
+  "n_races_in_window": 7020,
+  "baseline": {
+    "n": 7020,
+    "top1_hits": 2383,
+    "top3_hits": 4713
+  },
+  "pedigree_v1": {
+    "n": 7020,
+    "top1_hits": 2472,
+    "top3_hits": 4847
+  }
+}

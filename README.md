@@ -78,7 +78,8 @@ TJK AJAX  →  scraper/        →  PostgreSQL
 | Hız | En iyi derece (EİD → saniye), speed figure (m/s) |
 | Fiziksel | Kilo farkı, ekipman değişikliği, gate (start kapısı) |
 | Pazar | AGF (Ağırlıklı Galibiyet Faktörü) — ham, edge, ve normalize varyant |
-| Soy | Sire-level win rate ve zemin uyumu |
+| Soy | Sire & dam win rate, zemin-koşullu varyantlar (sire/dam × surface) |
+| Jokey × pist | Jockey'nin spesifik pistteki Bayesian-smoothed win rate |
 | Koşu | HP (handikap), yarış sınıfı, pist tipi, GNY, field size |
 
 Her özellik için bkz. `src/ganyan/predictor/features.py` ve
@@ -90,6 +91,28 @@ Her özellik için bkz. `src/ganyan/predictor/features.py` ve
 > çıktı; yeniden eğitilen LightGBM'in feature importance'ı **agf_edge
 > baskın, 11 özellik sıfır-üzeri gain** (önceden 4 özellik sıfır-üzeri,
 > geri kalan feature'lar NaN nedeniyle hiç split'e sokulmamıştı).
+
+> **Pedigree v1 — OOS-validated lift (2026-05-06).** İki yeni soy
+> feature (`dam_win_rate`, `dam_surface_rate`) ve bir jokey×pist
+> etkileşim feature'ı (`jockey_track_win_rate`) eklendi (FEATURE_COLUMNS
+> 39 → 42). Live LightGBM ranker yeniden eğitildi.
+>
+> Out-of-sample test (`logs/oos_pedigree_v1.py`): 2025-01-01 → 2026-02-04
+> penceresi (400 gün, 7020 tam-alan resulted yarış, ≥4 entries):
+>
+> | | Top-1 | Top-3 |
+> |---|---|---|
+> | Baseline (39 feature) | 33.95% | 67.14% |
+> | Pedigree v1 (42 feature) | **35.21%** | **69.05%** |
+> | Lift | **+1.27pp** | **+1.91pp** |
+>
+> V2 retraction'ın çıkardığı OOS barı (≥365 gün AND ≥1500 yarış AND
+> top-1 lift ≥ +1pp) ilk denemede aşıldı. V2 features (in-sample +3.6pp,
+> OOS +0.07pp) ile karşılaştırıldığında: bu sefer in-sample lift OOS'da
+> replicate oluyor — overfit değil, gerçek yeni bilgi (parent çiftinin
+> dam tarafı + jokey'nin pist-spesifik formu mevcut feature'lardan
+> çıkarılamaz). Feature importance'ta `dam_surface_rate` #5,
+> `jockey_track_win_rate` #9 sırada (training holdout).
 
 ---
 

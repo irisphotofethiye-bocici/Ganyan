@@ -49,6 +49,9 @@ FEATURE_COLUMNS: list[str] = [
     "agf_edge",
     "sire_win_rate",
     "sire_surface_rate",
+    "dam_win_rate",
+    "dam_surface_rate",
+    "jockey_track_win_rate",
     # Domain-derived signals ("sürpriz at" features).
     "surface_switch",
     "distance_delta_m",
@@ -252,6 +255,7 @@ def build_training_frame(
                 continue
             trainer_name = entry.horse.trainer if entry.horse else None
             sire_name = entry.horse.sire if entry.horse else None
+            dam_name = entry.horse.dam if entry.horse else None
             features = extract_features(
                 eid_seconds=parse_eid_to_seconds(entry.eid),
                 distance_meters=race.distance_meters,
@@ -273,6 +277,8 @@ def build_training_frame(
                 agf=float(entry.agf) if entry.agf is not None else None,
                 field_size=field_size,
                 sire=sire_name,
+                dam=dam_name,
+                track_id=race.track_id,
                 equipment=entry.equipment,
                 field_pace_density=pace_density,
                 agf_reliability=agf_reliability,
@@ -326,6 +332,9 @@ def build_training_frame(
                 "agf_edge": features.agf_edge,
                 "sire_win_rate": features.sire_win_rate,
                 "sire_surface_rate": features.sire_surface_rate,
+                "dam_win_rate": features.dam_win_rate,
+                "dam_surface_rate": features.dam_surface_rate,
+                "jockey_track_win_rate": features.jockey_track_win_rate,
                 "surface_switch": features.surface_switch,
                 "distance_delta_m": features.distance_delta_m,
                 "equipment_changed": features.equipment_changed,
@@ -421,6 +430,7 @@ def build_race_frame(session: Session, race_id: int) -> pd.DataFrame:
     for entry in entries:
         trainer_name = entry.horse.trainer if entry.horse else None
         sire_name = entry.horse.sire if entry.horse else None
+        dam_name = entry.horse.dam if entry.horse else None
         features = extract_features(
             eid_seconds=parse_eid_to_seconds(entry.eid),
             distance_meters=race.distance_meters,
@@ -442,6 +452,8 @@ def build_race_frame(session: Session, race_id: int) -> pd.DataFrame:
             agf=float(entry.agf) if entry.agf is not None else None,
             field_size=field_size,
             sire=sire_name,
+            dam=dam_name,
+            track_id=race.track_id,
             equipment=entry.equipment,
             field_pace_density=pace_density,
             agf_reliability=agf_reliability,
@@ -462,6 +474,9 @@ def build_race_frame(session: Session, race_id: int) -> pd.DataFrame:
             "agf_edge": features.agf_edge,
             "sire_win_rate": features.sire_win_rate,
             "sire_surface_rate": features.sire_surface_rate,
+            "dam_win_rate": features.dam_win_rate,
+            "dam_surface_rate": features.dam_surface_rate,
+            "jockey_track_win_rate": features.jockey_track_win_rate,
             "surface_switch": features.surface_switch,
             "distance_delta_m": features.distance_delta_m,
             "equipment_changed": features.equipment_changed,
