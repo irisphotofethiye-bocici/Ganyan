@@ -62,6 +62,10 @@ uv run pytest tests/test_predictor/test_bayesian.py::test_probabilities_sum_to_1
 
 4. **Frame around winning horse and winning bet, not payout/ROI** — primary metric is top-1 hit rate. (Existing memory; reaffirmed here.)
 
+5. **Tek + Plase is the default ticket when model #1 ≥ 30%.** Established 2026-05-04 after a 13-race day where the model called 5 winners at 22-43% conviction we skipped to chase exotics, while Üçlü-K3 set match was only 15% (2/13) — even with 77% top-3 hit rate. Üçlü K-3 has takeout penalty without multiplier upside; high-multiplier exotics (4'lü/5'lı/6'lı/7'lı) and Tek+Plase are the structures with mathematical paths to edge. **Never recover losses with bigger exotics** — recovery comes from the next clean signal.
+
+6. **Pull live ensemble before any bet recommendation.** `ganyan predict --today` invokes the single-head MLPredictor; the daemon's scheduled inference runs the 11-head EnsemblePredictor and writes to the `Prediction` table. These can disagree by 10pp. Query `Prediction` rows directly (sort `predicted_at desc`) before quoting probabilities for any stake-sizing decision. Re-pull within 30 minutes of post when stakes are >100 TL.
+
 ## Architecture
 
 Three-layer service-oriented monorepo sharing PostgreSQL:

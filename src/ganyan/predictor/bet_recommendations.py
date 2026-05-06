@@ -116,10 +116,16 @@ def compute_bet_recommendations(
     out: list[BetPick] = []
 
     # ---- Tek (Ganyan) — banko on the model's #1 ----
+    # 2026-05-04: when prob ≥ 30%, flag as primary ticket per CLAUDE.md
+    # invariant 5 — Tek+Plase is the default at high conviction.
     gan = ganyan_probabilities(mp)
     if gan:
         top = gan[0]
         h = top.horses[0]
+        prob_pct = top.probability * 100.0
+        note = "Modelin en güvendiği at"
+        if prob_pct >= 30.0:
+            note = f"ÖNCELİKLİ — model %{prob_pct:.0f} güvende, Tek+Plase ana taktik"
         out.append(BetPick(
             bet_type="ganyan",
             label="Tek (Ganyan) — banko",
@@ -129,8 +135,8 @@ def compute_bet_recommendations(
             tickets=1,
             birim_tl=BIRIM_TL["ganyan"],
             stake_tl=BIRIM_TL["ganyan"],
-            model_prob_pct=top.probability * 100.0,
-            note="Modelin en güvendiği at",
+            model_prob_pct=prob_pct,
+            note=note,
         ))
 
     # ---- Plase — top-2 finish coverage ----
@@ -207,6 +213,10 @@ def compute_bet_recommendations(
             ))
 
     # ---- Üçlü Komple-3 (any order of model's top 3) ----
+    # 2026-05-04: flag fragility when top-3 cluster <70% OR #4 ≥10%.
+    # On 2026-05-04, K-3 set match was 15% across 13 races even with
+    # 77% top-3 hit rate — the structure is brittle when #4 has real
+    # probability mass.
     if n >= 3:
         us = uclu_probabilities(mp)
         if us:
@@ -214,6 +224,15 @@ def compute_bet_recommendations(
             top3_set = set(top.horses)
             any_order = sum(c.probability for c in us if set(c.horses) == top3_set)
             ordered_top3 = sorted(top3_set, key=lambda h: -mp[h])
+            top3_cluster = sum(mp[h] for h in top3_set)
+            ranked = sorted(mp.items(), key=lambda kv: -kv[1])
+            fourth_prob = ranked[3][1] if len(ranked) >= 4 else 0.0
+            note = "Aynı 3 atın 6 olası sıralaması — varyans düşük"
+            if top3_cluster < 0.70 or fourth_prob >= 0.10:
+                note = (
+                    f"DİKKAT — top-3 kümesi %{top3_cluster*100:.0f}, "
+                    f"#4 at %{fourth_prob*100:.0f}: K-3 kırılgan, Tek tercih edilebilir"
+                )
             out.append(BetPick(
                 bet_type="uclu_komple3",
                 label="Üçlü — Komple 3 (her sıralama)",
@@ -224,7 +243,7 @@ def compute_bet_recommendations(
                 birim_tl=BIRIM_TL["uclu_sirali"],
                 stake_tl=6 * BIRIM_TL["uclu_sirali"],
                 model_prob_pct=any_order * 100.0,
-                note="Aynı 3 atın 6 olası sıralaması — varyans düşük",
+                note=note,
             ))
 
     # ---- Üçlü Virgüllü — banko + spread (1 banko, top-2 for 2nd, top-2 for 3rd)
