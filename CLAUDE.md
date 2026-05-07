@@ -66,6 +66,22 @@ uv run pytest tests/test_predictor/test_bayesian.py::test_probabilities_sum_to_1
 
 6. **Pull live ensemble before any bet recommendation.** `ganyan predict --today` invokes the single-head MLPredictor; the daemon's scheduled inference runs the 11-head EnsemblePredictor and writes to the `Prediction` table. These can disagree by 10pp. Query `Prediction` rows directly (sort `predicted_at desc`) before quoting probabilities for any stake-sizing decision. Re-pull within 30 minutes of post when stakes are >100 TL.
 
+7. **Never overwrite the live model file directly.** `ganyan train` (default invocation) writes to `models/lightgbm_ranker.{txt,meta.json}` — i.e. THE LIVE MODEL the daemon reads every 30 min. A bare `uv run ganyan train` will silently replace the in-production weights with whatever the random seed + this morning's data window produced, even when in-sample top-1 is 2-5pp WORSE than what's already deployed (observed 2026-05-08: pedigree_v1 42.94% → fresh train 40.25%). The discipline is:
+
+   ```bash
+   # 1. Train under a non-production name
+   uv run ganyan train --model-name lightgbm_ranker_test
+
+   # 2. OOS validate against the project's window bar (≥365d, ≥1500 races)
+   uv run python logs/discordance_oos_backtest.py --model lightgbm_ranker_test
+
+   # 3. ONLY swap if OOS top-1 lift ≥ +1pp vs current production
+   mv models/lightgbm_ranker_test.txt models/lightgbm_ranker.txt
+   mv models/lightgbm_ranker_test.meta.json models/lightgbm_ranker.meta.json
+   ```
+
+   Same rule applies to any tool (Gemini, scripts, manual edits) that mutates files under `models/` — train to a separate name, OOS validate, swap. If the live model has been overwritten without OOS, revert via `git checkout HEAD -- models/lightgbm_ranker.{txt,meta.json}` before the next 30-min daemon tick reads it.
+
 ## Architecture
 
 Three-layer service-oriented monorepo sharing PostgreSQL:
