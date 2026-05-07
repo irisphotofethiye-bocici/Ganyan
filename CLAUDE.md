@@ -66,7 +66,7 @@ uv run pytest tests/test_predictor/test_bayesian.py::test_probabilities_sum_to_1
 
 6. **Pull live ensemble before any bet recommendation.** `ganyan predict --today` invokes the single-head MLPredictor; the daemon's scheduled inference runs the 11-head EnsemblePredictor and writes to the `Prediction` table. These can disagree by 10pp. Query `Prediction` rows directly (sort `predicted_at desc`) before quoting probabilities for any stake-sizing decision. Re-pull within 30 minutes of post when stakes are >100 TL.
 
-7. **Never overwrite the live model file directly.** `ganyan train` (default invocation) writes to `models/lightgbm_ranker.{txt,meta.json}` — i.e. THE LIVE MODEL the daemon reads every 30 min. A bare `uv run ganyan train` will silently replace the in-production weights with whatever the random seed + this morning's data window produced, even when in-sample top-1 is 2-5pp WORSE than what's already deployed (observed 2026-05-08: pedigree_v1 42.94% → fresh train 40.25%). The discipline is:
+7. **Never overwrite the live model file directly.** `ganyan train` (default invocation) writes to `models/lightgbm_ranker.{txt,meta.json}` — i.e. THE LIVE MODEL the daemon reads every 30 min. A bare `uv run ganyan train` will silently replace the in-production weights with whatever the random seed + this morning's data window produced, even when in-sample top-1 is 2-5pp WORSE than what's already deployed (observed: pedigree_v1 42.94% top-1 was overwritten by a routine retrain that landed at 40.25%). Same applies to any external tool, agent, or one-off script that writes under `models/`. The discipline is:
 
    ```bash
    # 1. Train under a non-production name
@@ -80,7 +80,7 @@ uv run pytest tests/test_predictor/test_bayesian.py::test_probabilities_sum_to_1
    mv models/lightgbm_ranker_test.meta.json models/lightgbm_ranker.meta.json
    ```
 
-   Same rule applies to any tool (Gemini, scripts, manual edits) that mutates files under `models/` — train to a separate name, OOS validate, swap. If the live model has been overwritten without OOS, revert via `git checkout HEAD -- models/lightgbm_ranker.{txt,meta.json}` before the next 30-min daemon tick reads it.
+   If the live model has been overwritten without OOS, revert via `git checkout HEAD -- models/lightgbm_ranker.{txt,meta.json}` before the next 30-min daemon tick reads it.
 
 ## Architecture
 
