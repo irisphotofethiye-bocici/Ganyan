@@ -412,7 +412,7 @@ def _build_predictor(session, model: str):
 
 def _predict_race(race_id: int, json_output: bool, model: str) -> None:
     """Predict a single race and save predictions to DB."""
-    from ganyan.db import get_session
+    from ganyan.db import get_session, Race
 
     session = get_session()
     try:
@@ -422,7 +422,8 @@ def _predict_race(race_id: int, json_output: bool, model: str) -> None:
             typer.echo(f"No predictions for race {race_id}.")
             return
         session.commit()
-        _display_predictions(predictions, race_id, json_output)
+        race = session.get(Race, race_id)
+        _display_predictions(predictions, race, race_id, json_output)
     finally:
         session.close()
 
@@ -445,7 +446,7 @@ def _predict_today(json_output: bool, model: str) -> None:
         predictor = _build_predictor(session, model)
         for race in races:
             predictions = predictor.predict_and_save(race.id)
-            _display_predictions(predictions, race.id, json_output)
+            _display_predictions(predictions, race, race.id, json_output)
             typer.echo("")  # blank line separator
         # Refresh picks so /advice reflects the fresh predictions rather
         # than a stale morning snapshot.  Graded picks are preserved.
@@ -457,12 +458,62 @@ def _predict_today(json_output: bool, model: str) -> None:
         session.close()
 
 
-def _display_predictions(predictions, race_id: int, json_output: bool) -> None:
-    """Display predictions for a single race."""
+def _format_race_header(race) -> tuple[str, str]:
+    """Build the two-line race header used by ``_display_predictions``.
+
+    Returns ``(line1, line2)``.  Either may be empty when the
+    underlying race attribute is missing — callers should drop empty
+    lines rather than print blanks.
+    """
+    if race is None:
+        return ("", "")
+    track = race.track.name if getattr(race, "track", None) else "?"
+    parts = [track]
+    if race.distance_meters or race.surface:
+        bits = []
+        if race.distance_meters:
+            bits.append(f"{race.distance_meters} m")
+        if race.surface:
+            bits.append(race.surface)
+        parts.append(f"({', '.join(bits)})")
+    when = []
+    if race.date:
+        when.append(race.date.strftime("%d.%m.%Y"))
+    if race.post_time:
+        when.append(f"@ {race.post_time}")
+    suffix = f"({' '.join(when)})" if when else ""
+    line1 = f"{' '.join(parts)} - #{race.race_number}"
+    if suffix:
+        line1 = f"{line1} {suffix}"
+    line2_bits = [s for s in (race.horse_type, race.race_type) if s]
+    line2 = ", ".join(line2_bits)
+    return (line1, line2)
+
+
+def _display_predictions(predictions, race, race_id: int, json_output: bool) -> None:
+    """Display predictions for a single race.
+
+    ``race`` may be None — falls back to the bare ``race_id`` heading
+    that the older callsites used.  When provided we render a richer
+    track/distance/surface/time header (PR #3 idea, ORM-side; no view
+    or migration needed since Race already carries the fields).
+    """
     if json_output:
         import json
 
-        data = [
+        out: dict = {"race_id": race_id}
+        if race is not None:
+            out["race"] = {
+                "track": race.track.name if getattr(race, "track", None) else None,
+                "race_number": race.race_number,
+                "date": race.date.isoformat() if race.date else None,
+                "post_time": race.post_time,
+                "distance_meters": race.distance_meters,
+                "surface": race.surface,
+                "race_type": race.race_type,
+                "horse_type": race.horse_type,
+            }
+        out["predictions"] = [
             {
                 "horse_id": p.horse_id,
                 "horse_name": p.horse_name,
@@ -472,15 +523,23 @@ def _display_predictions(predictions, race_id: int, json_output: bool) -> None:
             }
             for p in predictions
         ]
-        typer.echo(json.dumps({"race_id": race_id, "predictions": data}, indent=2))
+        typer.echo(json.dumps(out, indent=2))
+        return
+
+    line1, line2 = _format_race_header(race)
+    if line1:
+        typer.echo(line1)
+        if line2:
+            typer.echo(line2)
+        typer.echo("")
     else:
         typer.echo(f"Race {race_id} predictions:")
-        typer.echo(f"{'#':<4} {'Horse':<25} {'Prob %':<10} {'Conf':<8}")
-        typer.echo("-" * 50)
-        for i, p in enumerate(predictions, 1):
-            typer.echo(
-                f"{i:<4} {p.horse_name:<25} {p.probability:>6.1f}%    {p.confidence:.2f}"
-            )
+    typer.echo(f"{'#':<4} {'Horse':<25} {'Prob %':<10} {'Conf':<8}")
+    typer.echo("-" * 50)
+    for i, p in enumerate(predictions, 1):
+        typer.echo(
+            f"{i:<4} {p.horse_name:<25} {p.probability:>6.1f}%    {p.confidence:.2f}"
+        )
 
 
 # ---------------------------------------------------------------------------
