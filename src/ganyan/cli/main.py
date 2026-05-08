@@ -458,6 +458,104 @@ def _predict_today(json_output: bool, model: str) -> None:
         session.close()
 
 
+@app.command("predictions")
+def predictions_cmd(
+    today: bool = typer.Option(False, "--today", help="Show predictions for today's races."),
+    on_date: str = typer.Option(None, "--date", help="Show predictions for YYYY-MM-DD."),
+    top_k: int = typer.Option(3, "--top-k", help="Top N horses to display per race."),
+    json_output: bool = typer.Option(False, "--json", help="Output JSON."),
+) -> None:
+    """Display the latest stored predictions per race (read-only).
+
+    Reads the Prediction table — does NOT recompute.  Use this to see what
+    the daemon's ensemble most recently wrote without disturbing the audit
+    trail or running an in-process predictor.
+    """
+    from datetime import date as _date, datetime as _dt
+    from sqlalchemy import select, func
+    from ganyan.db import get_session, Race, RaceEntry
+    from ganyan.db.models import Horse, Prediction, Track
+
+    if not today and not on_date:
+        typer.echo("Provide --today or --date YYYY-MM-DD.")
+        raise typer.Exit(1)
+    target = _date.today() if today else _dt.strptime(on_date, "%Y-%m-%d").date()
+
+    session = get_session()
+    try:
+        races = session.execute(
+            select(Race, Track).join(Track)
+            .where(Race.date == target)
+            .order_by(Track.name, Race.race_number)
+        ).all()
+        if not races:
+            typer.echo(f"No races on {target}.")
+            return
+
+        out: list[dict] = []
+        for race, track in races:
+            latest_ts = session.execute(
+                select(func.max(Prediction.predicted_at))
+                .join(RaceEntry, RaceEntry.id == Prediction.race_entry_id)
+                .where(RaceEntry.race_id == race.id)
+            ).scalar()
+            row = {
+                "race_id": race.id,
+                "track": track.name,
+                "race_number": race.race_number,
+                "distance_m": race.distance_meters,
+                "surface": race.surface,
+                "post_time": race.post_time,
+                "predicted_at": latest_ts.isoformat() if latest_ts else None,
+                "model_version": None,
+                "top": [],
+            }
+            if latest_ts:
+                rows = session.execute(
+                    select(Prediction, Horse, RaceEntry)
+                    .join(RaceEntry, RaceEntry.id == Prediction.race_entry_id)
+                    .join(Horse, Horse.id == RaceEntry.horse_id)
+                    .where(RaceEntry.race_id == race.id, Prediction.predicted_at == latest_ts)
+                    .order_by(Prediction.probability.desc())
+                ).all()
+                if rows:
+                    row["model_version"] = rows[0][0].model_version
+                row["top"] = [
+                    {
+                        "gate": re_.gate_number,
+                        "horse": h.name,
+                        "probability_pct": round(float(p.probability), 2),
+                    }
+                    for p, h, re_ in rows[:top_k]
+                ]
+            out.append(row)
+
+        if json_output:
+            import json
+            typer.echo(json.dumps(out, indent=2, ensure_ascii=False))
+            return
+
+        for row in out:
+            head = (
+                f"{row['track']:<9} R{row['race_number']:<2} "
+                f"({row['distance_m']:>4}m {(row['surface'] or '')[:8]:<8}) "
+                f"post={row['post_time'] or '--:--'}"
+            )
+            if not row["predicted_at"]:
+                typer.echo(f"{head}  (no prediction)")
+                continue
+            ts = _dt.fromisoformat(row["predicted_at"]).strftime("%H:%M")
+            ver = (row["model_version"] or "")[:22]
+            picks = " | ".join(
+                f"#{t['gate'] if t['gate'] is not None else '?':<2}:"
+                f"{(t['horse'] or '')[:13]:<13} {t['probability_pct']:>4.1f}%"
+                for t in row["top"]
+            )
+            typer.echo(f"{head} pred@{ts} ver={ver:<22}  {picks}")
+    finally:
+        session.close()
+
+
 def _format_race_header(race) -> tuple[str, str]:
     """Build the two-line race header used by ``_display_predictions``.
 
