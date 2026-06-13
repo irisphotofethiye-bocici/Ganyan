@@ -1,204 +1,269 @@
-# CLAUDE.md
+# CLAUDE.md — At Yarışı Analiz Sistemi (Ganyan Fork)
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Bu dosya, Claude Code'un bu repoda çalışırken HER OTURUMDA uyması gereken
+kurallardır. Kurallar tartışılmaz. Bir görev bu kurallarla çelişiyorsa, görevi
+yapma — dur ve kullanıcıya sor.
 
-## Project Overview
-
-Ganyan is a Turkish horse racing prediction system. It scrapes race data from TJK (Türkiye Jokey Kulübü), stores it in PostgreSQL, and generates Bayesian predictions served via CLI and Flask web app.
-
-## Commands
-
-```bash
-# Start PostgreSQL
-docker compose up -d
-
-# Install dependencies
-uv sync --all-extras
-
-# Run database migrations
-uv run ganyan db init
-
-# Scrape today's race cards
-uv run ganyan scrape --today
-
-# Scrape today's results
-uv run ganyan scrape --results
-
-# Backfill historical data
-uv run ganyan scrape --backfill --from 2024-01-01
-
-# Predict a specific race
-uv run ganyan predict <race_id>
-
-# Predict all today's races
-uv run ganyan predict --today
-uv run ganyan predict --today --json
-
-# List races
-uv run ganyan races --today
-uv run ganyan races --date 2024-03-15
-
-# Start web app (port 5003)
-uv run python -c "from ganyan.web.app import run; run()"
-
-# Run tests
-uv run pytest tests/ -v
-
-# Run a single test
-uv run pytest tests/test_predictor/test_bayesian.py::test_probabilities_sum_to_100 -v
-```
-
-## Project goal (2026-05-03)
-
-**Pick winners across all bet types.** Tek, İkili, Üçlü, 4'lü, 5'lı, 6'lı, 7'li — every structure. The model and pipeline exist to serve this goal, not to satisfy academic process rules. Hit rate is the primary metric; engineering work serves picking winners, not the other way around.
-
-## Critical invariants (read before consulting /advice for a real bet)
-
-1. **Model beats chance ≠ bets have edge.** The 2026-05-02 chance-hypothesis settlement proved the model has 3-17× lift over random (p≈0). The same date's OOS retest proved real kept-race ROI is **−20% to −30% on uclu_box6 and sirali_ikili_top1** — the takeout floor. These are independent claims. The advice gate filters for confidence, not edge after takeout.
-
-2. **The halt flag is authoritative.** `/tmp/ganyan-halt.flag` (or `$GANYAN_HALT_FLAG_PATH`) is set by canaries (rolling-PnL, uniformity guard, heartbeat, scrape integrity, regime monitor). When set, `/advice` and `ganyan advice` suppress Kelly stakes. Manually clear with `rm /tmp/ganyan-halt.flag` only after investigating the reason.
-
-3. **OOS bar: ≥365 days AND ≥1500 races.** Set by the V2 retraction (2026-05-02). Enforced in `logs/discordance_oos_backtest.py:assert_min_window`. Do not bypass.
-
-4. **Frame around winning horse and winning bet, not payout/ROI** — primary metric is top-1 hit rate. (Existing memory; reaffirmed here.)
-
-5. **Tek + Plase is the default ticket when model #1 ≥ 30%.** Established 2026-05-04 after a 13-race day where the model called 5 winners at 22-43% conviction we skipped to chase exotics, while Üçlü-K3 set match was only 15% (2/13) — even with 77% top-3 hit rate. Üçlü K-3 has takeout penalty without multiplier upside; high-multiplier exotics (4'lü/5'lı/6'lı/7'lı) and Tek+Plase are the structures with mathematical paths to edge. **Never recover losses with bigger exotics** — recovery comes from the next clean signal.
-
-6. **Pull live ensemble before any bet recommendation.** `ganyan predict --today` invokes the single-head MLPredictor; the daemon's scheduled inference runs the 11-head EnsemblePredictor and writes to the `Prediction` table. These can disagree by 10pp. Query `Prediction` rows directly (sort `predicted_at desc`) before quoting probabilities for any stake-sizing decision. Re-pull within 30 minutes of post when stakes are >100 TL.
-
-7. **Never overwrite the live model file directly.** `ganyan train` (default invocation) writes to `models/lightgbm_ranker.{txt,meta.json}` — i.e. THE LIVE MODEL the daemon reads every 30 min. A bare `uv run ganyan train` will silently replace the in-production weights with whatever the random seed + this morning's data window produced, even when in-sample top-1 is 2-5pp WORSE than what's already deployed (observed: pedigree_v1 42.94% top-1 was overwritten by a routine retrain that landed at 40.25%). Same applies to any external tool, agent, or one-off script that writes under `models/`. The discipline is:
-
-   ```bash
-   # 1. Train under a non-production name
-   uv run ganyan train --model-name lightgbm_ranker_test
-
-   # 2. OOS validate against the project's window bar (≥365d, ≥1500 races)
-   uv run python logs/discordance_oos_backtest.py --model lightgbm_ranker_test
-
-   # 3. ONLY swap if OOS top-1 lift ≥ +1pp vs current production
-   mv models/lightgbm_ranker_test.txt models/lightgbm_ranker.txt
-   mv models/lightgbm_ranker_test.meta.json models/lightgbm_ranker.meta.json
-   ```
-
-   If the live model has been overwritten without OOS, revert via `git checkout HEAD -- models/lightgbm_ranker.{txt,meta.json}` before the next 30-min daemon tick reads it.
-
-## Architecture
-
-Three-layer service-oriented monorepo sharing PostgreSQL:
-
-1. **Scraper** (`src/ganyan/scraper/`) — TJK website client using AJAX endpoints at `/TR/YarisSever/Info/Sehir/GunlukYarisProgrami`. `tjk_api.py` fetches race cards and results per city via `SehirId` parameters. `parser.py` normalizes raw HTML data into dataclasses. `backfill.py` handles idempotent storage and incremental historical loading.
-
-2. **Predictor** (`src/ganyan/predictor/`) — Empirical Bayesian model. `features.py` extracts speed figure, form cycle (exponential decay), weight delta, rest fitness (Gaussian curve), and class indicator. `bayesian.py` computes prior (1/N) x feature likelihoods → normalized probabilities with confidence scores and contributing factors.
-
-3. **Web + CLI** (`src/ganyan/web/`, `src/ganyan/cli/`) — Flask app with HTMX (Bootstrap 5, Turkish UI). Typer CLI for terminal use. Both consume predictor and scraper directly.
-
-### Data Flow
-
-```
-TJK website (AJAX per city) → scraper/tjk_api.py → scraper/parser.py → scraper/backfill.py → PostgreSQL
-                                                                                                    ↓
-CLI (ganyan predict) ← predictor/bayesian.py ← predictor/features.py ← race_entries table
-Flask (/races/<id>/predict) ←────────────────┘
-```
-
-### Key Turkish Racing Metrics
-
-- **HP** — Handikap Puanı (handicap points)
-- **KGS** — Koşmama Gün Sayısı (days since last race; 14-28 optimal)
-- **S20** — Son 20 yarış performansı (last 20 races performance)
-- **EİD** — En İyi Derece (best time, stored as string "1.30.45", converted to seconds for computation)
-- **GNY** — Günlük Nispi Yarış puanı (daily relative race score)
-- **AGF** — Ağırlıklı Galibiyet Faktörü (weighted win factor)
-
-### Database
-
-PostgreSQL 16 via Docker Compose. SQLAlchemy 2.0 ORM + Alembic migrations. Tables: `tracks`, `races` (unique on track+date+race_number), `horses` (unique on name), `race_entries` (pre-race + post-race fields in one row), `scrape_log`.
-
-### Config
-
-`pydantic-settings` reads from `.env` file or environment variables. See `.env.example`. Key: `DATABASE_URL`, `TJK_BASE_URL`, `SCRAPE_DELAY`, `FLASK_PORT`.
-
-### Reporting Conventions
-
-When discussing model or strategy performance, frame around the **winning horse** and **winning bet** — not the payout or ROI.
-
-- **Primary metric**: top-1 hit rate (did we pick the winning horse?)
-- **Secondary**: top-3 hit rate; binary strategy hit rate (`ganyan_top1`, `sirali_ikili_top1`, `uclu_top1`, `uclu_box6`)
-- **Tertiary** (only when sizing strategy or explicitly asked): payout/ROI/net-TL
-
-Payout reflects TJK pool dynamics (takeout, retail behavior, "devren" carryovers) more than model quality. A 33% top-1 day on short-priced favorites shows −25% ROI because the math doesn't work at 1.9× average odds — but the model is doing its job. Don't anchor model-quality reports on money.
-
-## Maintenance routines
-
-| Cadence | Task | How |
-| --- | --- | --- |
-| Daily 12:00 | Heartbeat (liveness + uniformity) | `launchctl list \| grep com.ganyan.heartbeat` |
-| Daily 12:30 | Scrape integrity (AGF drift) | `launchctl list \| grep com.ganyan.integrity` |
-| Daily 23:30 | Regime monitor (takeout drift) | `launchctl list \| grep com.ganyan.regime` |
-| Weekly | Commit-ratio audit (ganyan vs linguistic) | `git log --since="7 days ago" --oneline \| wc -l` in each repo; if ganyan > 5× linguistic for 2 consecutive weeks, force a Ganyan freeze week |
-
-# CLAUDE.md
-
-Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
-
-**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
-
-## 1. Think Before Coding
-
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
-
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
-
-## 2. Simplicity First
-
-**Minimum code that solves the problem. Nothing speculative.**
-
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
-
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
-
-## 3. Surgical Changes
-
-**Touch only what you must. Clean up only your own mess.**
-
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
-
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
-
-The test: Every changed line should trace directly to the user's request.
-
-## 4. Goal-Driven Execution
-
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
-```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
-```
-
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+Bu proje **fatihbozdag/Ganyan** repo'sunun fork'udur. Sıfırdan yazılmıyor;
+mevcut çalışan kod temel alınır, üzerine kurallar ve ajan katmanı eklenir.
 
 ---
 
-**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+## 0. EN ÖNEMLİ KURAL — SIFIR HALÜSİNASYON
+
+Bu sistem para kararına bağlanabilecek sayılar üretir. Yanlış ama
+"doğru görünen" bir sayı, hiç sayı olmamasından daha tehlikelidir.
+Aşağıdaki ilkeler her şeyin üstündedir:
+
+1. **LLM (sen ve Claude Code) HİÇBİR sayı üretmez.**
+   Olasılık, oran, Kelly payı, ROI, feature değeri, istatistik — hepsi
+   deterministik Python kodundan gelir. Bir sayıyı "hesaplayıp" yazma;
+   o sayıyı üreten kodu yaz ve kodu çalıştır.
+
+2. **Bilmiyorsan "bilmiyorum" de.** Bir veri alanının ne olduğundan,
+   bir TJK kısaltmasının anlamından, bir formülün doğruluğundan emin
+   değilsen TAHMİN ETME. Dosyadan oku, kullanıcıya sor, ya da "doğrulanmadı"
+   olarak işaretle. Uydurulmuş bir alan eşleştirmesi tüm modeli bozar.
+
+3. **Her sayısal çıktı kaynağına kadar izlenebilir olmalı.** Bir tahmin
+   üretildiğinde hangi model versiyonu, hangi feature seti, hangi veri
+   tarihiyle üretildiği loglanır (provenance). "Nereden geldi bu?" sorusu
+   her zaman cevaplanabilir olmalı.
+
+4. **Şüphedeyken sus.** Eksik veya şüpheli veriyle tahmin üretmektense
+   o yarışı "değerlendirilmedi" olarak atlamak doğrudur. Sistem sessiz
+   kalmayı bilmeli.
+
+---
+
+## 1. MİMARİ SINIRLAR (aşılmaz)
+
+```
+VERİ KATMANI    Python scraper (Ganyan'ın scraper/'ı) — TJK açık sayfaları
+                ↓ (yapılandırılmış veri, PostgreSQL)
+BEYİN KATMANI   Python — features + LightGBM + Bayesian + Harville (saf kod)
+                ↓ (predictions, provenance damgalı)
+AJAN KATMANI    Orkestratör + Doğrulama + Rapor (LLM, ama sayı üretmez)
+                ↓
+```
+
+- Veri katmanı ile beyin katmanı arasındaki sınır aşılmaz. Scraper model
+  bilmez, model scraper bilmez. İkisi sadece DB üzerinden konuşur.
+- Yeni bir bağımlılık eklemeden önce sor. Mevcut Ganyan stack'i kullan:
+  Python 3.12+, PostgreSQL, SQLAlchemy 2.0, Alembic, uv, LightGBM, PyMC,
+  Flask+HTMX, Typer.
+
+---
+
+## 2. VERİ KAYNAĞI — kesinleşmiş kararlar
+
+- **Kaynak:** TJK'nın HERKESE AÇIK web sayfaları (tjk.org), Ganyan'ın
+  `scraper/` modülüyle. Tarih parametreli erişim mevcut.
+- **Anahtar yok:** `vhs.tjk.org` iç API'sine ve `X-Auth` anahtarına
+  GİRİLMEZ. bilaleren/tjk-api yaklaşımı (anahtar gerektiren) bu projede
+  KULLANILMAZ. Meşru, anahtarsız açık-sayfa kazıma esastır.
+- **Kibar kazıma:** Saniyede en fazla 1 istek. Rate-limit/ban riskine
+  karşı bekleme ve retry zorunlu. Agresif paralel kazıma YASAK.
+- **Statik vs güncel ayrımı:**
+  - Statik (geçmiş): bir kez backfill edilir, DB'de yaşar, tekrar çekilmez.
+  - Güncel (günlük): sadece o günün programı + sonucu eklenir (artımlı).
+- **Yasal sınır:** Bu KİŞİSEL ANALİZ ARACIDIR. Ticari ürün/servis değildir.
+  Ürünleştirme kullanıcının ayrıca hukuki danışmanlık alacağı bir karardır;
+  kod bu sınırı varsayar.
+
+---
+
+## 3. KONUMLANDIRMA — bu bir "+EV bahis botu" DEĞİLDİR
+
+Ganyan'ın 1.841 canlı pick'lik defteri Türkiye havuzunda **pozitif edge
+olmadığını** kanıtladı (tüm stratejiler takeout tabanında, ROI negatif).
+Bu yüzden:
+
+- Sistemin hedefi "kâr maksimize etmek" DEĞİL. Hedef: **top-1 isabet
+  doğruluğu** + "hangi yarış değerli/belirsiz, hangisi atlanmalı" filtresi.
+- Birincil metrik **top-1 hit oranı**, ROI değil (ROI havuz dinamiklerini
+  yansıtır, model kalitesini değil).
+- "+EV bulduk, şuna oyna" tarzı kesin tavsiye üretme. "Model şu olasılığı
+  veriyor, karar senin" çerçevesi esastır.
+- Gerçek para modu KOD SEVİYESİNDE KİLİTLİDİR (bkz. §7).
+
+---
+
+## 4. LEAKAGE — bir numaralı teknik tuzak
+
+TJK sonuç verisi (Ganyan `ResultsTransformer`) yarış ÖNCESİ ve SONRASI
+bilgiyi aynı objede taşır. Bunları karıştırmak backtest'i şişirir,
+canlıda çökertir. KURAL:
+
+**Yalnızca yarış öncesi bilinen alanlar feature olabilir:**
+- İzin verilenler: kilo, fazla kilo, kilo indirimi, jokey, antrenör,
+  sahip, yetiştirici, pedigree (baba/anne/3 kuşak), KGS (koşmama gün
+  sayısı), handikap, son6/son20 (ÖNCEKİ yarışlardan), ekipman (TAKI),
+  start kapısı, AGF (yayınlandıysa), pist/zemin/hava (yarış öncesi tahmin).
+
+**Şunlar SADECE hedef (target), ASLA feature değildir:**
+- SONUC (varış sırası), DERECE (bitiş zamanı), GANYAN (gerçekleşen oran),
+  FARK (kazanana fark), SON800 (o yarışın pace'i), foto-finiş, video.
+
+- Her yeni feature için `shift(1)` / zamansal pencere kontrolü zorunlu:
+  bir atın "son 5 form"u BUGÜNÜ içermez, sadece öncesini.
+- Ganyan'ın `tests/` altındaki leakage smoke testlerini KORU ve her
+  feature eklendiğinde çalıştır. Test yoksa yaz.
+- Şüpheli bir alanın hangi tarafta olduğundan emin değilsen: feature
+  yapma, kullanıcıya sor.
+
+---
+
+## 5. HESAPLAMA — sayılar nasıl üretilir
+
+- Feature üretimi pandas/numpy ile, vektörize (satır-satır döngü değil).
+- Model: Ganyan'ın LightGBM LambdaRank ranker + Hierarchical Bayesian
+  Plackett-Luce (skip-gate) yapısı korunur.
+- Olasılıklar yarış içinde normalize edilir (toplam = 1).
+- Kombinasyon (üçlü/ikili) = Harville joint probabilities (kod), LLM değil.
+- Kalibrasyon her retrain'de kontrol edilir (model %20 diyorsa gerçekten
+  ~%20 mi kazanıyor). Kalibrasyonsuz olasılıkla stake hesabı yapılmaz.
+- Manuel veri girişi varsa (oran vb.): iki otomatik kontrol zorunlu —
+  (a) makul aralık (oran 1.0–200 dışı = red), (b) implied probability
+  toplamı ≈ 1 + kesinti; bant dışıysa "giriş hatası olası" uyarısı.
+
+---
+
+## 6. AJAN KATMANI — roller ve yetki sınırları
+
+Ajanlar serbest sohbet etmez. Sabit sıra (DAG): Veri → Doğrulama →
+Model(kod) → Kapı(kod) → Rapor. Her ajanın yetkisi sınırlıdır.
+
+| Ajan | Yapabilir | YAPAMAZ |
+|---|---|---|
+| Orkestratör (Şef) | DAG yürüt, state oku/yaz, hata yönet, eskalasyon | hesap, sayı, kapı atlama, canlı kilit açma |
+| Veri Ajanı | scraper çalıştır, parse hatası teşhisi, "eksik" raporla | eksik veriyi uydur, kendini onayla |
+| Doğrulama (Critic) | ham veri tutarlılık yargısı, PASS/FAIL | veriyi düzelt, "muhtemelen doğru" deyip geçir |
+| Rapor Ajanı | anlatı yaz, SHAP yorumla, "doğrulanmadı" damgala | sayı üret/yuvarla/düzelt, claims dışı iddia |
+
+- **Critic bağımsızdır:** Veri Ajanı'nın gerekçelerini GÖRMEZ, sadece ham
+  çıktıyı görür. (Aynı bağlamı paylaşan ajan kendi hatasını onaylar.)
+- **Rapor şablon-doldurma modunda çalışır:** anlatı serbest, ama sayı
+  alanları doğrudan predictions JSON'undan enjekte edilir. LLM'in eline
+  sayı yazma fırsatı yapısal olarak geçmez.
+
+---
+
+## 7. GÜVENLİK KİLİTLERİ (kod seviyesinde, LLM kapatamaz)
+
+1. **Paper-only kilidi:** Sistem varsayılan olarak sahte-parayla çalışır.
+   Gerçek para modu config'de kilitlidir. Açılma koşulu: ≥3 ay paper +
+   tanımlı metrik eşikleri. Bu kilidi yalnızca İNSAN açar; hiçbir ajan,
+   hiçbir kod otomatik açamaz.
+2. **İki kapı:**
+   - Kapı 1 (veri girişi): Critic + kod kontrolleri (yarış sayısı, null
+     oranı, tarih tutarlılığı, leakage audit). Geçmeyen veri modele girmez.
+   - Kapı 2 (rapor çıkışı): Rapordaki HER sayı, kod ile predictions
+     JSON'una diff'lenir. Eşleşmeyen tek sayı → rapor reddedilir. Bu
+     kontrolü LLM DEĞİL kod yapar.
+3. **3-deneme kuralı:** Aynı adım 3 kez başarısız olursa DUR, "FAILED"
+   yaz, kullanıcıya tek satır özet ver. Sonsuz retry YASAK. "Tahminle
+   devam edeyim" seçeneği YOK.
+4. **Trip-wire:** Ganyan'ın ±2σ konfidans sapma freni korunur. Model
+   günlük ortalama konfidansı baseline'dan saparsa banner/halt.
+5. **Bütçe tavanı:** Adım başına max tool call, run başına süre/token
+   tavanı. Aşım → kill + alarm.
+
+---
+
+## 8. YEREL LLM — sistemden ÇIKARILDI
+
+Yerel model (Gemma/Ollama) bu sistemden bilinçli olarak çıkarıldı.
+Gerekçe: tek gerçek görevi at/jokey isim eşleştirmeydi; bu iş TJK
+verisindeki benzersiz ID'lerle (AtId, KEY vb.) çözülür — LLM gerektirmez.
+Kalan ufak normalizasyon (büyük/küçük harf, boşluk) basit Python string
+işlemleriyle, halüsinasyon riski sıfır, yapılır. Ek bir LLM = ek bağımlılık,
+ek bakım, ek halüsinasyon kaynağı; faydası bu yükten düşük.
+
+- **Kural:** Bu sisteme yerel veya bulut, EK bir LLM çağrı katmanı
+  eklenmez. İsim/etiket eşleştirme ID ve string işlemleriyle yapılır.
+- Eğer ileride ID ile çözülemeyen, gerçekten serbest-metin bir normalizasyon
+  ihtiyacı çıkarsa, önce kullanıcıya sorulur — varsayılan olarak eklenmez.
+- "LLM sayı üretmez" kuralı (Bölüm 0) zaten Claude Code için de geçerli;
+  yerel model gitmesi bu savunmayı zayıflatmaz.
+
+---
+
+## 9. ÇALIŞMA TARZI (vibecoding kuralları)
+
+1. **Plan önce, kod sonra.** Geri alınamaz veya büyük bir değişiklik
+   öncesi tek satır özet sun, onay bekle (kullanıcının prensibi).
+2. **Cerrahi ol.** Görev kapsamı dışına çıkma. Başka sorun görürsen NOT
+   et, SOR, dokunma.
+3. **Her şeyi çalıştırarak doğrula.** "Bu kod çalışır" deme; çalıştır,
+   çıktıyı göster. Test varsa koştur.
+4. **Token bilinci:** Gereksiz dosya yükleme, gereksiz uzun çıktı üretme.
+   Az ve doğru bilgi, çok ve gürültülü bilgiden iyidir.
+5. **Sessiz varsayım yasak.** Belirsizliği yüzeye çıkar. Özellikle
+   fiyat/tarih/metrik/oran gibi yüksek riskli alanlarda dur ve doğrula.
+6. **Hafıza sıfırdan:** Her oturum bu dosyayı okuyarak başlar. "Hatırladım"
+   deme; bağlam lazımsa bu dosyadan veya repodan oku.
+
+---
+
+## 10. KURULUM SIRASI (bu sırayla ilerle, atlama)
+
+```
+[1] Önkoşul testleri      authKey YOK (atlandı); TJK ToS/robots.txt oku
+[2] Fork + bu CLAUDE.md   repo'yu klonla, Postgres/uv kur, Ganyan'ı ayağa
+                          kaldır, BU dosyayı köke koy
+[3] Scraper doğrula       Ganyan scraper'ı bugünün verisini çekiyor mu;
+                          TJK sayfası değiştiyse tamir
+[4] Statik backfill       geçmiş veriyi tarih döngüsüyle çek (saniyede 1),
+                          DB'ye yaz — bir kez
+[5] Feature + model       Ganyan'dan adapte, HER feature için leakage testi
+[6] Kapılar               Kapı 1 (Critic+kod) ve Kapı 2 (kod-diff) kur
+[7] Ajan katmanı          Orkestratör/Critic/Rapor — çekirdek sağlamken.
+                          ÖNCE skill-kurulum kapılarını kontrol et (aşağı bak);
+                          dördü de doğru değilse skill YAZMA, çekirdeğe dön.
+[8] Paper trading         kilit kapalı, 3 ay sayaç başlar
+```
+
+(Not: Yerel LLM/Gemma entegrasyonu adımı çıkarıldı — bkz. Bölüm 8.)
+
+Her adım bitmeden sonrakine geçme. Bir adım FAILED olursa dur, raporla,
+yeni talimat bekle.
+
+---
+
+## 10.1 SKILL KURULUMU — ne zaman ve neler
+
+Ajan katmanı (Adım 7) **skill** dosyaları olarak kurulur. Ama skill
+yazmadan önce DÖRT KAPI da doğru olmalı. Biri bile eksikse skill YAZMA,
+çekirdeğe dön — erken yazılan skill havada kalır ve halüsinasyon kapısı açar.
+
+**Dört kapı (hepsi doğru olmalı):**
+1. Çekirdek pipeline uçtan uca bir kez çalıştı (scraper → DB → feature →
+   model → bir predictions JSON'u üretildi).
+2. Gerçek veri yapısı görülüyor (predictions JSON, DB tabloları, feature
+   çıktısı — tahmin değil, gözle görülen gerçek alan adları).
+3. Kapı 2 (kod-diff) çalışıyor (rapor sayılarını JSON'a karşı denetleyen kod).
+4. İlgili "ajan işi" en az bir kez elle yapıldı ve tekrar ettiği görüldü.
+
+**Tek soruyla test:** "Skill içeriğini gerçek bir çıktıya BAKARAK mı
+yazıyorum, yoksa nasıl olacağını HAYAL EDEREK mi?" Hayal ediyorsan erken.
+
+**Yazılacak skill'ler (sadece YARGI/ROL içerir, hesap/sayı ASLA):**
+| Skill | Görevi | İçinde ASLA olmaz |
+|---|---|---|
+| `orchestrator` | DAG yürüt, state oku/yaz, hata yönet, eskalasyon dili | hesap, sayı |
+| `data-critic` | ham veri denetim tarzı, PASS/FAIL kararı, anomali yakalama | veri düzeltme yetkisi |
+| `report-writer` | anlatı kurma, "doğrulanmadı" damgası, ton | sayı yazma (JSON'dan enjekte) |
+
+**Skill OLMAYACAK olanlar (deterministik = kod):** scraper, feature
+üretimi, model, Kapı 2 diff, Kelly/olasılık/istatistik. Bunlar skill
+yapılırsa LLM yorumuna açılır ve her gün farklı sonuç riski doğar.
+
+---
+
+## ÖZET — tek cümle
+
+Bu sistem geleceği görmez; geçmişi düzgün hatırlar, hesabı duygusuz kod
+yapar, yanıldığını ölçer, emin olmadığında susar, ve gerçek paraya
+yalnızca insan onayıyla dokunur. Sayı üreten her şey koddur; LLM sadece
+metin işler ve asla uydurmaz.
